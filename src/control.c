@@ -17,7 +17,7 @@
 #include "engine.h"
 
 #define SPEEDCYCLE 4
-#define CLOCKOUTWIDTH 25
+#define CLOCKOUTWIDTH 10
 #define MAX_DIVISIONS 128
 
 #define B_FULL 11
@@ -123,7 +123,7 @@ void process_event(u8 event, u8 *data, u8 length) {
             break;
     
         case FRONT_BUTTON_PRESSED:
-            current_tick = 1;
+            current_tick = 0;
             break;
     
         case FRONT_BUTTON_HELD:
@@ -143,8 +143,8 @@ void process_event(u8 event, u8 *data, u8 length) {
                 if (!is_external_clock_connected()) step();
             } else if (data[0] == CLOCKOUTTIMER) {
                 set_clock_output(0);
-            } else if (data[0] == GATETIMER) {
-                for (u8 i = 0; i < 8; i++) set_gate(i, 0);
+            } else if (data[0] >= GATETIMER) {
+                set_gate(data[0] - GATETIMER, 0);
             }
             break;
         
@@ -191,34 +191,34 @@ void save_preset() {
 }
 
 void step() {
-    clock();
     output_clock();
+    clock();
     refresh_grid();
 }
 
 void clock() {
-        current_tick = (current_tick + 1) % MAX_DIVISIONS;
-        for (u8 i = 0; i < 8; i++) {
-            switch (p.row[i].logic.type) {
-                case 0: // NONE
-                    if (current_tick % clock_divs[p.row[i].position - 4] == 0) fire_gate(i);
-                    break;
-                case 1: // AND
-                    if (current_tick % clock_divs[p.row[i].position - 4] == 0 && current_tick % p.row[i].logic.value == 0) fire_gate(i);
-                    break;
-                case 2: // OR
-                    if (current_tick % clock_divs[p.row[i].position - 4] == 0 || current_tick % p.row[i].logic.value == 0) fire_gate(i);
-                    break;
-                case 3: // NOR
-                    if (current_tick % clock_divs[p.row[i].position - 4] != 0 && current_tick % p.row[i].logic.value != 0) fire_gate(i);
-                    break;
-            }
+    current_tick = (current_tick + 1) % MAX_DIVISIONS;
+    for (u8 i = 0; i < 8; i++) {
+        switch (p.row[i].logic.type) {
+            case 0: // NONE
+                if (current_tick % clock_divs[p.row[i].position - 4] == 0) fire_gate(i);
+                break;
+            case 1: // AND
+                if (current_tick % clock_divs[p.row[i].position - 4] == 0 && current_tick % p.row[i].logic.value == 0) fire_gate(i);
+                break;
+            case 2: // OR
+                if (current_tick % clock_divs[p.row[i].position - 4] == 0 || current_tick % p.row[i].logic.value == 0) fire_gate(i);
+                break;
+            case 3: // NOR
+                if (current_tick % clock_divs[p.row[i].position - 4] != 0 && current_tick % p.row[i].logic.value != 0) fire_gate(i);
+                break;
         }
-
-    add_timed_event(GATETIMER, 25, 0);
+    }
 }
 
 void fire_gate(u8 row) {
+    // can set dynamic gate length here
+    add_timed_event(GATETIMER + row, 10, 0);
     set_gate(row, 1);
     p.row[row].blink = 1;
 }
@@ -235,8 +235,6 @@ void update_speed() {
     if (sp > 2000) sp = 2000; else if (sp < 20) sp = 20;
     
     update_timer_interval(CLOCKTIMER, 60000 / sp);
-    // to be added, grid stuff
-    // update_display();
 }
 
 void output_clock() {
