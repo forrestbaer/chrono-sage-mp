@@ -18,7 +18,6 @@
 
 #define SPEEDCYCLE 4
 #define CLOCKOUTWIDTH 10
-#define MAX_DIVISIONS 128
 
 #define B_FULL 11
 #define B_HALF 6
@@ -35,6 +34,7 @@ shared_data_t s;
 
 u8 selected_row;
 u8 current_tick;
+u8 current_tickers[8];
 u8 is_preset_saved;
 u32 speed, speed_mod, gate_length_mod;
 
@@ -197,20 +197,20 @@ void step() {
 }
 
 void clock() {
-    current_tick = (current_tick + 1) % MAX_DIVISIONS;
     for (u8 i = 0; i < 8; i++) {
+        current_tickers[i] = (current_tickers[i] + 1);
         switch (p.row[i].logic.type) {
             case 0: // NONE
-                if (current_tick % clock_divs[p.row[i].position - 4] == 0) fire_gate(i);
+                if (current_tickers[i] % clock_divs[p.row[i].position - 4] == 0) fire_gate(i);
                 break;
             case 1: // AND
-                if (current_tick % clock_divs[p.row[i].position - 4] == 0 && current_tick % p.row[i].logic.value == 0) fire_gate(i);
+                if (current_tickers[i] % clock_divs[p.row[i].position - 4] == 0 && current_tickers[i] % p.row[i].logic.value == 0) fire_gate(i);
                 break;
             case 2: // OR
-                if (current_tick % clock_divs[p.row[i].position - 4] == 0 || current_tick % p.row[i].logic.value == 0) fire_gate(i);
+                if (current_tickers[i] % clock_divs[p.row[i].position - 4] == 0 || current_tickers[i] % p.row[i].logic.value == 0) fire_gate(i);
                 break;
             case 3: // NOR
-                if (current_tick % clock_divs[p.row[i].position - 4] != 0 && current_tick % p.row[i].logic.value != 0) fire_gate(i);
+                if (current_tickers[i] % clock_divs[p.row[i].position - 4] != 0 && current_tickers[i] % p.row[i].logic.value != 0) fire_gate(i);
                 break;
         }
     }
