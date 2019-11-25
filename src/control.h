@@ -21,12 +21,13 @@ enum logical_type { NONE, AND, OR, NOR };
 
 typedef struct {
     enum logical_type type;
-    u8 value;
     u8 compared_row;
 } logic_t;
 
 typedef struct {
     u8 position;
+    u8 division;
+    u8 triggers[MAX_STEPS];
     u8 blink;
     logic_t logic;
 } row_params_t;

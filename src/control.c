@@ -18,6 +18,7 @@
 
 #define SPEEDCYCLE 4
 #define CLOCKOUTWIDTH 10
+#define MAX_STEPS 128
 
 #define B_FULL 11
 #define B_HALF 6
@@ -39,6 +40,9 @@ u8 is_preset_saved;
 u32 speed, speed_mod, gate_length_mod;
 
 u8 clock_divs[12] = {128,64,32,16,8,7,6,5,4,3,2,1};
+
+static void set_trigger_bits(u8 row);
+static int get_division(u8 row);
 
 static void save_preset(void);
 static void save_preset_with_confirmation(void);
@@ -70,6 +74,8 @@ void init_presets(void) {
     
     for (u8 i = 0; i < 8; i++) {
         p.row[i].position = 15 - i;
+        p.row[i].division = get_division(p.row[i].postion);
+        set_trigger_bits(y, p.row[i].division);
         p.row[i].logic.type = NONE;
     }
 
@@ -177,6 +183,35 @@ void process_event(u8 event, u8 *data, u8 length) {
 // -----------------
 // actions
 
+void set_trigger_bits(int r, int division) {
+    for (int i = 0; i < MAX_STEPS; i++) {
+        p.row[r].triggers[i] = (i + 1) % division == 0 ? 1 : 0;
+    }
+    if (p.row[r].logic.type > 0) {
+        switch(p.row[r].logic.type) {
+            case 1: // AND
+                for (int i = 0; i < MAX_STEPS; i++) {
+                    p.row[r].triggers[i] = p.row[r].triggers[i] && p.row[p.row[r].logic.compared_row].triggers[i] ? 1 : 0;
+                }
+            break;
+            case 2: // OR
+                for (int i = 0; i < MAX_STEPS; i++) {
+                    p.row[r].triggers[i] = p.row[r].triggers[i] || p.row[p.row[r].logic.compared_row].triggers[i] ? 1 : 0;
+                }
+            break;
+            case 3: // XOR
+                for (int i = 0; i < MAX_STEPS; i++) {
+                    p.row[r].triggers[i] = p.row[r].triggers[i] != p.row[p.row[r].logic.compared_row].triggers[i] ? 1 : 0;
+                }
+            break;
+        }
+    }
+}
+
+int get_division(int row) {
+    return clock_divs[p.row[i].position - 4];
+}
+
 void save_preset_with_confirmation() {
     is_preset_saved = 1;
     save_preset();
@@ -197,22 +232,9 @@ void step() {
 }
 
 void clock() {
+    current_tick = (current_tick + 1) % MAX_STEPS;
     for (u8 i = 0; i < 8; i++) {
-        current_tickers[i] = (current_tickers[i] + 1);
-        switch (p.row[i].logic.type) {
-            case 0: // NONE
-                if (current_tickers[i] % clock_divs[p.row[i].position - 4] == 0) fire_gate(i);
-                break;
-            case 1: // AND
-                if (current_tickers[i] % clock_divs[p.row[i].position - 4] == 0 && current_tickers[i] % p.row[i].logic.value == 0) fire_gate(i);
-                break;
-            case 2: // OR
-                if (current_tickers[i] % clock_divs[p.row[i].position - 4] == 0 || current_tickers[i] % p.row[i].logic.value == 0) fire_gate(i);
-                break;
-            case 3: // NOR
-                if (current_tickers[i] % clock_divs[p.row[i].position - 4] != 0 && current_tickers[i] % p.row[i].logic.value != 0) fire_gate(i);
-                break;
-        }
+        if (p.row[i].trigger[current_tick]) fire_gate(i);
     }
 }
 
@@ -256,16 +278,24 @@ void process_grid_press(u8 x, u8 y, u8 on) {
     // division buttons
     //
     if (x > 3 && x < 16) {
+        // TODO: update set_trigger_bits here to update bit table on change
+        // TODO: should add a new param for is_referenced_by to update referenced table as well
         p.row[y].position = x;
     }
 
     //
     // logic buttons
+    // sets logic type and comparison row
     //
     if ((x > 0 && x < 4) && selected_row != y) {
         p.row[selected_row].logic.type = p.row[selected_row].logic.type == x && p.row[selected_row].logic.compared_row == y ? 0 : x;
         p.row[selected_row].logic.compared_row = y;
-        p.row[selected_row].logic.value = clock_divs[p.row[y].position - 4];
+        p.row[selected_row].division = get_division(y);
+        // TODO: 
+        //if (p.row[p.row[selected_row].logic.compared_row].logic.type > 0) {
+        //    set_trigger_bits(p.row[selected_row].logic.compared_row, get_division(p.row[selected_row].logic.compared_row));
+        // }
+        set_trigger_bits(y, p.row[selected_row].division);
     }
 }
 
