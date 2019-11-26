@@ -18,7 +18,6 @@
 
 #define SPEEDCYCLE 4
 #define CLOCKOUTWIDTH 10
-#define MAX_STEPS 128
 
 #define B_FULL 11
 #define B_HALF 6
@@ -27,22 +26,23 @@
 #define SPEEDTIMER 0
 #define CLOCKTIMER 1
 #define CLOCKOUTTIMER 2
-#define GATETIMER 3
+#define ROTATETIMER 3
+#define GATETIMER 4
 
 preset_data_t p;
 preset_meta_t m;
 shared_data_t s;
 
 u8 selected_row;
+u8 just_rotated;
 u8 current_tick;
-u8 current_tickers[8];
 u8 is_preset_saved;
 u32 speed, speed_mod, gate_length_mod;
 
 u8 clock_divs[12] = {128,64,32,16,8,7,6,5,4,3,2,1};
 
-static void set_trigger_bits(u8 row);
-static int get_division(u8 row);
+static void set_trigger_bits(u8 r, u8 d);
+static int get_division(u8 pos);
 
 static void save_preset(void);
 static void save_preset_with_confirmation(void);
@@ -50,7 +50,9 @@ static void save_preset_with_confirmation(void);
 static void update_speed_from_knob(void);
 static void update_speed(void);
 
-void fire_gate(u8 row);
+static void fire_clock_rotation(void);
+static void rotate_clocks(void);
+static void fire_gate(u8 row);
 
 static void process_grid_press(u8 x, u8 y, u8 on);
 
@@ -74,9 +76,9 @@ void init_presets(void) {
     
     for (u8 i = 0; i < 8; i++) {
         p.row[i].position = 15 - i;
-        p.row[i].division = get_division(p.row[i].postion);
-        set_trigger_bits(y, p.row[i].division);
-        p.row[i].logic.type = NONE;
+        p.row[i].division = get_division(p.row[i].position);
+        set_trigger_bits(i, p.row[i].division);
+        p.row[i].logic.type = 0;
     }
 
     store_preset_to_flash(0, &m, &p);
@@ -106,7 +108,7 @@ void init_control(void) {
 void process_event(u8 event, u8 *data, u8 length) {
     switch (event) {
         case MAIN_CLOCK_RECEIVED:
-            step();
+            fire_clock_rotation();
             break;
         
         case MAIN_CLOCK_SWITCHED:
@@ -146,9 +148,12 @@ void process_event(u8 event, u8 *data, u8 length) {
             if (data[0] == SPEEDTIMER) {
                 update_speed_from_knob();
             } else if (data[0] == CLOCKTIMER) {
-                if (!is_external_clock_connected()) step();
+                step();
             } else if (data[0] == CLOCKOUTTIMER) {
                 set_clock_output(0);
+            } else if (data[0] == ROTATETIMER) {
+                just_rotated = 0;
+                rotate_clocks();
             } else if (data[0] >= GATETIMER) {
                 set_gate(data[0] - GATETIMER, 0);
             }
@@ -183,33 +188,33 @@ void process_event(u8 event, u8 *data, u8 length) {
 // -----------------
 // actions
 
-void set_trigger_bits(int r, int division) {
+void set_trigger_bits(u8 r, u8 d) {
     for (int i = 0; i < MAX_STEPS; i++) {
-        p.row[r].triggers[i] = (i + 1) % division == 0 ? 1 : 0;
+        p.row[r].triggers[i] = (i + 1) % d == 0 ? 1 : 0;
     }
     if (p.row[r].logic.type > 0) {
         switch(p.row[r].logic.type) {
             case 1: // AND
                 for (int i = 0; i < MAX_STEPS; i++) {
-                    p.row[r].triggers[i] = p.row[r].triggers[i] && p.row[p.row[r].logic.compared_row].triggers[i] ? 1 : 0;
+                    p.row[r].triggers[i] = p.row[r].triggers[i] && p.row[p.row[r].logic.compared_to_row].triggers[i] ? 1 : 0;
                 }
             break;
             case 2: // OR
                 for (int i = 0; i < MAX_STEPS; i++) {
-                    p.row[r].triggers[i] = p.row[r].triggers[i] || p.row[p.row[r].logic.compared_row].triggers[i] ? 1 : 0;
+                    p.row[r].triggers[i] = p.row[r].triggers[i] || p.row[p.row[r].logic.compared_to_row].triggers[i] ? 1 : 0;
                 }
             break;
             case 3: // XOR
                 for (int i = 0; i < MAX_STEPS; i++) {
-                    p.row[r].triggers[i] = p.row[r].triggers[i] != p.row[p.row[r].logic.compared_row].triggers[i] ? 1 : 0;
+                    p.row[r].triggers[i] = p.row[r].triggers[i] != p.row[p.row[r].logic.compared_to_row].triggers[i] ? 1 : 0;
                 }
             break;
         }
     }
 }
 
-int get_division(int row) {
-    return clock_divs[p.row[i].position - 4];
+int get_division(u8 pos) {
+    return clock_divs[pos - 4];
 }
 
 void save_preset_with_confirmation() {
@@ -234,7 +239,33 @@ void step() {
 void clock() {
     current_tick = (current_tick + 1) % MAX_STEPS;
     for (u8 i = 0; i < 8; i++) {
-        if (p.row[i].trigger[current_tick]) fire_gate(i);
+        if (p.row[i].triggers[current_tick]) fire_gate(i);
+    }
+}
+
+void fire_clock_rotation() {
+    add_timed_event(ROTATETIMER, 100, 0);
+}
+
+void rotate_clocks() {
+    if (just_rotated == 0) {
+        u8 next_position = 0;
+        u8 first_pos = p.row[0].position;
+        u8 first_div = get_division(first_pos);
+
+        for (u8 i = 0; i < 8; i++) {
+            next_position = (next_position + 1) % 8;
+            if (next_position == 0) {
+                p.row[7].position = first_pos;
+                p.row[7].division = first_div;
+                set_trigger_bits(7, first_div);
+            } else {
+                p.row[i].position = p.row[next_position].position;
+                p.row[i].division = get_division(p.row[i].position);
+                set_trigger_bits(i, p.row[i].division);
+            }
+        }
+        just_rotated = 1;
     }
 }
 
@@ -278,9 +309,11 @@ void process_grid_press(u8 x, u8 y, u8 on) {
     // division buttons
     //
     if (x > 3 && x < 16) {
-        // TODO: update set_trigger_bits here to update bit table on change
-        // TODO: should add a new param for is_referenced_by to update referenced table as well
         p.row[y].position = x;
+        p.row[y].division = get_division(p.row[y].position);
+
+        // reverse linked list for setting bits ?
+        set_trigger_bits(y, p.row[y].division);
     }
 
     //
@@ -288,14 +321,13 @@ void process_grid_press(u8 x, u8 y, u8 on) {
     // sets logic type and comparison row
     //
     if ((x > 0 && x < 4) && selected_row != y) {
-        p.row[selected_row].logic.type = p.row[selected_row].logic.type == x && p.row[selected_row].logic.compared_row == y ? 0 : x;
-        p.row[selected_row].logic.compared_row = y;
-        p.row[selected_row].division = get_division(y);
-        // TODO: 
-        //if (p.row[p.row[selected_row].logic.compared_row].logic.type > 0) {
-        //    set_trigger_bits(p.row[selected_row].logic.compared_row, get_division(p.row[selected_row].logic.compared_row));
-        // }
-        set_trigger_bits(y, p.row[selected_row].division);
+
+        p.row[selected_row].logic.type = p.row[selected_row].logic.type == x && p.row[selected_row].logic.compared_to_row == y ? 0 : x;
+        p.row[selected_row].logic.compared_to_row = y;
+        p.row[selected_row].division = get_division(p.row[selected_row].position);
+
+        // reverse linked list for setting bits ?
+        set_trigger_bits(selected_row, p.row[selected_row].division);
     }
 }
 
@@ -313,9 +345,9 @@ void render_grid(void) {
 
         for (u8 i = 0; i < 8; i++) {
             set_grid_led(0, selected_row, B_HALF);
-            set_grid_led(1, i, p.row[selected_row].logic.type == 1 && p.row[selected_row].logic.compared_row == i ? B_HALF : B_DIM);
-            set_grid_led(2, i, p.row[selected_row].logic.type == 2 && p.row[selected_row].logic.compared_row == i ? B_HALF : B_DIM);
-            set_grid_led(3, i, p.row[selected_row].logic.type == 3 && p.row[selected_row].logic.compared_row == i ? B_HALF : B_DIM);
+            set_grid_led(1, i, p.row[selected_row].logic.type == 1 && p.row[selected_row].logic.compared_to_row == i ? B_HALF : B_DIM);
+            set_grid_led(2, i, p.row[selected_row].logic.type == 2 && p.row[selected_row].logic.compared_to_row == i ? B_HALF : B_DIM);
+            set_grid_led(3, i, p.row[selected_row].logic.type == 3 && p.row[selected_row].logic.compared_to_row == i ? B_HALF : B_DIM);
             set_grid_led(p.row[i].position, i, p.row[i].blink ? 10 : B_HALF);
             p.row[i].blink = 0;
         }
@@ -323,5 +355,5 @@ void render_grid(void) {
 }
 
 void render_arc(void) {
-    // render arc LEDs here or leave blank if not used
+    // no arc support for now, could be added!
 }

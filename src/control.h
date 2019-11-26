@@ -7,6 +7,8 @@
 // defines data structures for multipass preset management
 // ----------------------------------------------------------------------------
 
+#define MAX_STEPS 128
+
 #pragma once
 #include "types.h"
 
@@ -21,7 +23,9 @@ enum logical_type { NONE, AND, OR, NOR };
 
 typedef struct {
     enum logical_type type;
-    u8 compared_row;
+    u8 referenced_by;
+    u8 is_referenced;
+    u8 compared_to_row;
 } logic_t;
 
 typedef struct {

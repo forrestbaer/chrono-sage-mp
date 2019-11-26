@@ -1,5 +1,6 @@
 #!/bin/sh
 cd multipass/monome_euro/meadowphysics
+make clean
 make
 cp multipass_mp.hex ../../../dist/chrono-sage.hex
 make clean
