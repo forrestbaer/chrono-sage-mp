@@ -26,15 +26,13 @@
 #define SPEEDTIMER 0
 #define CLOCKTIMER 1
 #define CLOCKOUTTIMER 2
-#define ROTATETIMER 3
-#define GATETIMER 4
+#define GATETIMER 3
 
 preset_data_t p;
 preset_meta_t m;
 shared_data_t s;
 
 u8 selected_row;
-u8 just_rotated;
 u8 current_tick;
 u8 is_preset_saved;
 u32 speed, speed_mod, gate_length_mod;
@@ -50,7 +48,6 @@ static void save_preset_with_confirmation(void);
 static void update_speed_from_knob(void);
 static void update_speed(void);
 
-static void fire_clock_rotation(void);
 static void rotate_clocks(void);
 static void fire_gate(u8 row);
 
@@ -108,7 +105,7 @@ void init_control(void) {
 void process_event(u8 event, u8 *data, u8 length) {
     switch (event) {
         case MAIN_CLOCK_RECEIVED:
-            fire_clock_rotation();
+            if (data[1] == 1) rotate_clocks();
             break;
         
         case MAIN_CLOCK_SWITCHED:
@@ -151,9 +148,6 @@ void process_event(u8 event, u8 *data, u8 length) {
                 step();
             } else if (data[0] == CLOCKOUTTIMER) {
                 set_clock_output(0);
-            } else if (data[0] == ROTATETIMER) {
-                just_rotated = 0;
-                rotate_clocks();
             } else if (data[0] >= GATETIMER) {
                 set_gate(data[0] - GATETIMER, 0);
             }
@@ -243,29 +237,22 @@ void clock() {
     }
 }
 
-void fire_clock_rotation() {
-    add_timed_event(ROTATETIMER, 100, 0);
-}
-
 void rotate_clocks() {
-    if (just_rotated == 0) {
-        u8 next_position = 0;
-        u8 first_pos = p.row[0].position;
-        u8 first_div = get_division(first_pos);
+    u8 next_position = 0;
+    u8 first_pos = p.row[0].position;
+    u8 first_div = get_division(first_pos);
 
-        for (u8 i = 0; i < 8; i++) {
-            next_position = (next_position + 1) % 8;
-            if (next_position == 0) {
-                p.row[7].position = first_pos;
-                p.row[7].division = first_div;
-                set_trigger_bits(7, first_div);
-            } else {
-                p.row[i].position = p.row[next_position].position;
-                p.row[i].division = get_division(p.row[i].position);
-                set_trigger_bits(i, p.row[i].division);
-            }
+    for (u8 i = 0; i < 8; i++) {
+        next_position = (next_position + 1) % 8;
+        if (next_position == 0) {
+            p.row[7].position = first_pos;
+            p.row[7].division = first_div;
+            set_trigger_bits(7, first_div);
+        } else {
+            p.row[i].position = p.row[next_position].position;
+            p.row[i].division = get_division(p.row[i].position);
+            set_trigger_bits(i, p.row[i].division);
         }
-        just_rotated = 1;
     }
 }
 
