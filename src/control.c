@@ -21,23 +21,21 @@
 #define SPEEDCYCLE 4
 #define CLOCKOUTWIDTH 10
 
-#define B_FULL 11
+#define B_FULL 9 
 #define B_HALF 6
-#define B_DIM 2
+#define B_DIM 3
 
 #define SPEEDTIMER 0
 #define CLOCKTIMER 1
 #define CLOCKOUTTIMER 2
-#define ERRORTIMER 3
-#define GATETIMER 4
+#define GATETIMER 3
 
 preset_data_t p;
 preset_meta_t m;
 shared_data_t s;
 
 u8 selected_row;
-u8 do_blink_error;
-u8 do_blink_error_row;
+u8 ec, do_error, do_blink_error, error_ref_row;
 u8 current_tick;
 u8 is_preset_saved;
 u32 speed, speed_mod, gate_length_mod;
@@ -54,14 +52,16 @@ static void update_speed_from_knob(void);
 static void update_speed(void);
 
 static u8 get_total_logical_refs(void);
-static u8 is_logically_referenced(u8 r);
+static u8 get_row_compared_from(u8 r);
+static u8 is_logically_referenced(u8 r, u8 include_selected);
+static u8 is_circularly_referenced(u8 r);
 
 static void rotate_clocks(void);
 static void fire_gate(u8 r);
-static void blink_error(u8 r);
+static void error_alerts(void);
 
 static void process_grid_press(u8 x, u8 y, u8 on);
-
+static u8 set_logic_led(u8 r, u8 t); 
 static void step(void);
 static void output_clock(void);
 static void clock(void);
@@ -157,8 +157,6 @@ void process_event(u8 event, u8 *data, u8 length) {
                 step();
             } else if (data[0] == CLOCKOUTTIMER) {
                 set_clock_output(0);
-            } else if (data[0] == ERRORTIMER) {
-                do_blink_error = 1;             
             } else if (data[0] >= GATETIMER) {
                 set_gate(data[0] - GATETIMER, 0);
             }
@@ -199,19 +197,21 @@ void set_trigger_bits(u8 r, u8 d) {
     }
     if (p.row[r].logic.type > 0) {
         switch(p.row[r].logic.type) {
+            case 0:
+            break;
             case 1: // AND
                 for (int i = 0; i < MAX_STEPS; i++) {
-                    p.row[r].triggers[i] = p.row[r].triggers[i] && p.row[p.row[r].logic.compared_to_row - 1].triggers[i] ? 1 : 0;
+                    p.row[r].triggers[i] = p.row[r].triggers[i] && p.row[p.row[r].logic.compared_row - 1].triggers[i] ? 1 : 0;
                 }
             break;
             case 2: // OR
                 for (int i = 0; i < MAX_STEPS; i++) {
-                    p.row[r].triggers[i] = p.row[r].triggers[i] || p.row[p.row[r].logic.compared_to_row - 1].triggers[i] ? 1 : 0;
+                    p.row[r].triggers[i] = p.row[r].triggers[i] || p.row[p.row[r].logic.compared_row - 1].triggers[i] ? 1 : 0;
                 }
             break;
             case 3: // XOR
                 for (int i = 0; i < MAX_STEPS; i++) {
-                    p.row[r].triggers[i] = p.row[r].triggers[i] != p.row[p.row[r].logic.compared_to_row - 1].triggers[i] ? 1 : 0;
+                    p.row[r].triggers[i] = p.row[r].triggers[i] != p.row[p.row[r].logic.compared_row - 1].triggers[i] ? 1 : 0;
                 }
             break;
         }
@@ -238,6 +238,7 @@ void save_preset() {
 void step() {
     output_clock();
     clock();
+    error_alerts();
     refresh_grid();
 }
 
@@ -274,6 +275,20 @@ void fire_gate(u8 r) {
     p.row[r].blink = 1;
 }
 
+void error_alerts() {
+    if(do_error) {
+        ec++;
+        if (ec == 5) {
+            ec = 0;
+            do_error = 0;
+            do_blink_error = 0;
+            error_ref_row = 0;
+        } else {
+            do_blink_error = ec % 2 == 0 ? 0 : 1;
+        }
+    }
+}
+
 void update_speed_from_knob() {
     if (get_knob_count() == 0) return;
     
@@ -296,17 +311,37 @@ void output_clock() {
 u8 get_total_logical_refs() {
     u8 total_logical_references = 0;
     for (u8 i = 0; i < GATE_OUTS; i++) {
-        if (p.row[i].logic.compared_to_row > 0) total_logical_references++;
+        if (p.row[i].logic.compared_row > 0) total_logical_references++;
     }
     return total_logical_references;
 };
 
-u8 is_logically_referenced(u8 r) {
-    u8 is_referenced = 0;
+u8 get_row_compared_from(u8 r) {
     for (u8 i = 0; i < GATE_OUTS; i++) {
-        if (p.row[i].logic.compared_to_row - 1 == r) is_referenced = 1;
+        if (p.row[i].logic.compared_row - 1 == r) return i + 1;
     }
+}
+
+u8 is_logically_referenced(u8 r, u8 include_selected) {
+    // don't allow a channel to be selected for logic if it's already selected for logic (logic loops)
+    u8 is_referenced = 0;
+    
+    for (u8 i = 0; i < GATE_OUTS; i++) {
+        if (include_selected) {
+            if (p.row[i].logic.compared_row - 1 == r) is_referenced = 1;
+        } else {
+            if (i != selected_row) {
+                if (p.row[i].logic.compared_row - 1 == r) is_referenced = 1;
+            }
+        }
+    }
+    
     return is_referenced;
+}
+
+u8 is_circularly_referenced(u8 r) {
+    // don't allow selection of logic on selected row (self referencing)
+    return p.row[r].logic.compared_row > 0 && p.row[r].logic.compared_row - 1 == selected_row;
 }
 
 void process_grid_press(u8 x, u8 y, u8 on) {
@@ -335,28 +370,45 @@ void process_grid_press(u8 x, u8 y, u8 on) {
     // sets logic type and comparison row
     //
     if (x > 0 && x < 4) {
+
+        u8 toggled_logic = p.row[selected_row].logic.type == x && p.row[selected_row].logic.compared_row - 1 == y;
         
         // don't allow selection of logic on selected row (self referencing)
-        // don't allow all channels to have logic, otherwise a loop must exist
         // don't allow a channel to be selected for logic if it's already selected for logic (logic loops)
-        if (selected_row == y || get_total_logical_refs() >= GATE_OUTS || is_logically_referenced(y)) {
-            blink_error(y);
-            return;
+        // don't allow all channels to have logic, otherwise a loop must exist
+        if (is_logically_referenced(y, 0)) {
+            do_error = 1;
+            error_ref_row = get_row_compared_from(y);
+        } else if (is_circularly_referenced(y)) {
+            do_error = 1;
+            error_ref_row = y + 1;
+        } else if (selected_row == y || (get_total_logical_refs() > GATE_OUTS - 2 && toggled_logic == 0)) {
+            do_error = 1;
+        } else {
+            p.row[selected_row].logic.type = toggled_logic ? 0 : x;
+            p.row[selected_row].logic.compared_row = toggled_logic ? 0 : y + 1;
+            p.row[selected_row].division = get_division(p.row[selected_row].position);
+
+            // reverse linked list for setting bits ?
+            set_trigger_bits(selected_row, p.row[selected_row].division);
+
+            refresh_grid();
         }
-
-        p.row[selected_row].logic.type = p.row[selected_row].logic.type == x && p.row[selected_row].logic.compared_to_row - 1 == y ? 0 : x;
-        p.row[selected_row].logic.compared_to_row = y + 1;
-        p.row[selected_row].division = get_division(p.row[selected_row].position);
-
-        // reverse linked list for setting bits ?
-        set_trigger_bits(selected_row, p.row[selected_row].division);
     }
 }
 
-void blink_error(u8 r) {
-    do_blink_error_row = r;
-    add_timed_event(ERRORTIMER, 333, 3);
+u8 set_logic_led(u8 r, u8 t) {
+    if (p.row[selected_row].logic.type == t && p.row[selected_row].logic.compared_row - 1 == r) {
+        return B_FULL + 3;
+    } else {
+        if (is_logically_referenced(r, 0) || is_circularly_referenced(r)) {
+           return B_DIM; 
+        } else {
+            return B_DIM + 3;
+        }
+    }
 }
+
 
 void render_grid(void) {
     if (!is_grid_connected()) return;
@@ -370,17 +422,19 @@ void render_grid(void) {
     } else {
         clear_all_grid_leds();
 
-        if (do_blink_error) {
-            set_grid_led(1, do_blink_error_row, B_FULL);
+        for (u8 i = 0; i < GATE_OUTS; i++) {
+            set_grid_led(0, i, p.row[i].logic.compared_row > 0 ? B_DIM : 0);
+            set_grid_led(1, i, set_logic_led(i, 1));
+            set_grid_led(2, i, set_logic_led(i, 2));
+            set_grid_led(3, i, set_logic_led(i, 3));
+            set_grid_led(p.row[i].position, i, p.row[i].blink ? B_FULL + 3 : B_HALF);
+            p.row[i].blink = 0;
         }
 
-        for (u8 i = 0; i < GATE_OUTS; i++) {
-            set_grid_led(0, selected_row, B_HALF);
-            set_grid_led(1, i, p.row[selected_row].logic.type == 1 && p.row[selected_row].logic.compared_to_row - 1 == i ? B_HALF : B_DIM);
-            set_grid_led(2, i, p.row[selected_row].logic.type == 2 && p.row[selected_row].logic.compared_to_row - 1 == i ? B_HALF : B_DIM);
-            set_grid_led(3, i, p.row[selected_row].logic.type == 3 && p.row[selected_row].logic.compared_to_row - 1 == i ? B_HALF : B_DIM);
-            set_grid_led(p.row[i].position, i, p.row[i].blink ? 10 : B_HALF);
-            p.row[i].blink = 0;
+        if (do_blink_error == 1) {
+            set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, B_FULL + 3);
+        } else {
+            set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, B_HALF);
         }
     }
 }

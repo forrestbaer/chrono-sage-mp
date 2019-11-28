@@ -25,7 +25,7 @@ typedef struct {
     enum logical_type type;
     u8 referenced_by;
     u8 is_referenced;
-    u8 compared_to_row;
+    u8 compared_row;
 } logic_t;
 
 typedef struct {
