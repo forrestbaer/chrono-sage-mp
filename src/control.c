@@ -382,8 +382,9 @@ void process_grid_press(u8 x, u8 y, u8 on) {
         } else if (is_circularly_referenced(y)) {
             do_error = 1;
             error_ref_row = y + 1;
-        } else if (selected_row == y || (get_total_logical_refs() > GATE_OUTS - 2 && toggled_logic == 0)) {
+        } else if (selected_row == y || (get_total_logical_refs() > GATE_OUTS - 2 && toggled_logic == 0 && p.row[selected_row].logic.compared_row - 1 != y)) {
             do_error = 1;
+            error_ref_row = selected_row + 1;
         } else {
             p.row[selected_row].logic.type = toggled_logic ? 0 : x;
             p.row[selected_row].logic.compared_row = toggled_logic ? 0 : y + 1;
@@ -401,7 +402,7 @@ u8 set_logic_led(u8 r, u8 t) {
     if (p.row[selected_row].logic.type == t && p.row[selected_row].logic.compared_row - 1 == r) {
         return B_FULL + 3;
     } else {
-        if (is_logically_referenced(r, 0) || is_circularly_referenced(r)) {
+        if (is_logically_referenced(r, 0) || is_circularly_referenced(r) || selected_row == r || (get_total_logical_refs() > GATE_OUTS - 2 && p.row[selected_row].logic.compared_row - 1 != r)) {
            return B_DIM; 
         } else {
             return B_DIM + 3;
