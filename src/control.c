@@ -363,6 +363,13 @@ void process_grid_press(u8 x, u8 y, u8 on) {
 
         // reverse linked list for setting bits ?
         set_trigger_bits(y, p.row[y].division);
+
+        u8 cr = get_row_compared_from(y);
+        if (cr > 0) {
+            cr--;
+            p.row[cr].division = get_division(p.row[cr].position);
+            set_trigger_bits(cr, p.row[cr].division);
+        }
     }
 
     //
