@@ -20,13 +20,18 @@
 // shared types
 
 enum logical_type { NONE, AND, OR, NOR };
+enum logic_depth { SINGLE, NESTED };
+enum page_type { MAIN, CONFIG };
 
 typedef struct {
     enum logical_type type;
-    u8 referenced_by;
-    u8 is_referenced;
     u8 compared_row;
 } logic_t;
+
+typedef struct {
+    enum logic_depth logic_depth;
+    u8 clock_divs[12]; 
+} config_t;
 
 typedef struct {
     u8 position;
@@ -43,6 +48,7 @@ typedef struct {
 } preset_meta_t;
 
 typedef struct {
+    config_t config;
     row_params_t row[8];
 } preset_data_t;
 
