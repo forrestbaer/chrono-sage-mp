@@ -23,6 +23,11 @@ enum logical_type { NONE, AND, OR, NOR };
 enum logic_depth { SINGLE, NESTED };
 enum page_type { MAIN, CONFIG };
 
+typedef struct node {
+    u8 v;
+    struct node *next;
+} Node;
+
 typedef struct {
     enum logical_type type;
     u8 compared_row;
@@ -38,6 +43,7 @@ typedef struct {
     u8 division;
     u8 triggers[MAX_STEPS];
     u8 blink;
+    u8 logic_solved;
     logic_t logic;
 } row_params_t;
 

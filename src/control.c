@@ -17,6 +17,7 @@
 #include "engine.h"
 
 #define GATE_OUTS 8
+#define MAX_PRESETS 10
 
 #define SPEEDCYCLE 4
 #define CLOCKOUTWIDTH 10
@@ -36,9 +37,11 @@ shared_data_t s;
 
 enum page_type page;
 
+u8 nodes[8][8];
 u8 selected_row;
 u8 ec, do_error, do_blink_error, error_ref_row;
 u8 current_tick;
+u8 selected_preset;
 u8 is_preset_saved;
 u8 is_config_changed;
 u32 speed, speed_mod, gate_length_mod;
@@ -51,28 +54,38 @@ static void clock(void);
 static void update_speed_from_knob(void);
 static void update_speed(void);
 
+static void toggle_config_page(void);
+
 static void set_trigger_bits(u8 r, u8 d);
 static u8 get_division(u8 pos);
 
 static void save_preset(void);
 static void save_preset_with_confirmation(void);
+static void load_preset(u8 preset);
 
 static void reset_all_logic(void);
 static u8 get_total_logical_refs(void);
 static u8 get_row_compared_from(u8 r);
 static u8 is_logically_referenced(u8 r, u8 include_selected);
 static u8 is_circularly_referenced(u8 r);
+static u8 is_linked_circularly(u8 r);
 
+static void process_nested_change(u8 r);
 static void set_bits_for_logic_update(u8 x, u8 y, u8 was_toggled_off);
 
 static void rotate_clocks(void);
 static void fire_gate(u8 r);
 static void fire_error_alerts(void);
+static void set_preset_leds(void);
 
 static void process_grid_press(u8 x, u8 y, u8 on);
 static void process_grid_held(u8 x, u8 y);
 static u8 set_logic_led(u8 r, u8 t); 
 static void set_glyph_leds(enum logic_depth l);
+
+static u8 push(Node **stack, u8 val);
+static u8 pop(Node **stack, u8 *val);
+
 
 
 // ----------------------------------------------------------------------------
@@ -84,6 +97,8 @@ void init_presets(void) {
     // initialize shared (any data that should be shared by all presets) with default values
     // initialize preset with default values 
     // store them to flash
+
+    store_shared_data_to_flash(&s);
 
     p.config.logic_depth = SINGLE;
     for (u8 i = 0; i < 12; i++) {
@@ -97,8 +112,10 @@ void init_presets(void) {
         p.row[i].logic.type = 0;
     }
 
-    store_preset_to_flash(0, &m, &p);
-    store_shared_data_to_flash(&s);
+    for (u8 i = 0; i < MAX_PRESETS; i++) {
+        store_preset_to_flash(i, &m, &p);
+    }
+
     store_preset_index(0);
 }
 
@@ -110,8 +127,8 @@ void init_control(void) {
     page = MAIN;
 
     // load_shared_data_from_flash(&s);
-    load_preset_from_flash(0, &p);
-    load_preset_meta_from_flash(0, &m);
+    // load_preset_from_flash(0, &p);
+    load_preset(get_preset_index());
 
     // set up any other initial values and timers
     add_timed_event(CLOCKTIMER, 100, 1);
@@ -125,7 +142,7 @@ void init_control(void) {
 void process_event(u8 event, u8 *data, u8 length) {
     switch (event) {
         case MAIN_CLOCK_RECEIVED:
-            if (data[1] == 1) rotate_clocks();
+            if (data[1]) rotate_clocks();
             break;
         
         case MAIN_CLOCK_SWITCHED:
@@ -149,11 +166,10 @@ void process_event(u8 event, u8 *data, u8 length) {
             break;
     
         case FRONT_BUTTON_PRESSED:
-            current_tick = 0;
+            if (!data[0]) toggle_config_page();
             break;
     
         case FRONT_BUTTON_HELD:
-            save_preset_with_confirmation();
             break;
     
         case BUTTON_PRESSED:
@@ -235,14 +251,24 @@ u8 get_division(u8 pos) {
 }
 
 void save_preset_with_confirmation() {
-    is_preset_saved = 1;
     save_preset();
+    refresh_grid();
 }
 
 void save_preset() {
-    store_preset_to_flash(0, &m, &p);
+    store_preset_to_flash(selected_preset, &m, &p);
     store_shared_data_to_flash(&s);
-    store_preset_index(0);
+    store_preset_index(selected_preset);
+    is_preset_saved = 1;
+}
+
+void load_preset(u8 preset) {
+    selected_preset = preset;
+    load_preset_from_flash(selected_preset, &p);
+
+    //initEngine(&p.config);
+    //update_timer_interval(CLOCKTIMER, 60000 / p.speed);
+    //updateScales(p.scale_buttons);
 
     refresh_grid();
 }
@@ -343,6 +369,7 @@ u8 get_row_compared_from(u8 r) {
     for (u8 i = 0; i < GATE_OUTS; i++) {
         if (p.row[i].logic.compared_row - 1 == r) return i + 1;
     }
+    return 0;
 }
 
 u8 is_logically_referenced(u8 r, u8 include_selected) {
@@ -378,33 +405,38 @@ void set_bits_for_logic_update(u8 x, u8 y, u8 toggled_off) {
     refresh_grid();
 }
 
+void toggle_config_page() {
+    page = page == CONFIG ? MAIN : CONFIG;
+}
+
 void process_grid_press(u8 x, u8 y, u8 on) {
 
-    if (!on) return;
-
     if (page == CONFIG) {
-        // exit config
-        if (x == 0 && y == 0) {
-            if (is_config_changed == 1) {
-                is_config_changed = 0;
-                reset_all_logic();
-                page = MAIN;
-            } else {
-                page = MAIN;
-            }
+        // config page
+
+        // param load happening
+        if (page == CONFIG && x > 2 && x < 13 && y == 0 && !on) {
+            selected_preset = x - 3;
+            load_preset(selected_preset);
         }
 
-        // config page
-        if ((x > 2 && x < 7) && (y > 1 && y < 6)) {
+        // setting of logic_depth
+        if ((x > 2 && x < 7) && (y > 1 && y < 6) && p.config.logic_depth == NESTED) {
+            if (!on) return;
             p.config.logic_depth = SINGLE; 
-            is_config_changed = 1;
-        } else if ((x > 8 && x < 13) && (y > 1 && y < 6)) {
+            reset_all_logic();
+        } else if ((x > 8 && x < 13) && (y > 1 && y < 6) && p.config.logic_depth == SINGLE) {
+            if (!on) return;
             p.config.logic_depth = NESTED;
-            is_config_changed = 1;
+            reset_all_logic();
         }
 
         refresh_grid();
+
     } else if (page == MAIN) {
+ 
+        if (!on) return;
+
         // main page
 
         // select a row
@@ -412,28 +444,7 @@ void process_grid_press(u8 x, u8 y, u8 on) {
             selected_row = y;
         }
 
-        // division buttons
-        if (x > 3 && x < 16) {
-            p.row[y].position = x;
-            p.row[y].division = get_division(p.row[y].position);
-
-            // reverse linked list for setting bits ?
-            set_trigger_bits(y, p.row[y].division);
-
-            // update each row that's compared against this row (SINGLE mode)
-            if (p.config.logic_depth == SINGLE) {
-                for (u8 i = 0; i < GATE_OUTS; i++) {
-                    if (p.row[i].logic.compared_row - 1 == y) {
-                        set_trigger_bits(i, p.row[i].division);
-                    }
-                }
-            } else if (p.config.logic_depth == NESTED) {
-
-            }
-        }
-
         // logic buttons
-        // sets logic type and comparison row
         if (x > 0 && x < 4) {
 
             u8 was_toggled_off = p.row[selected_row].logic.type == x && p.row[selected_row].logic.compared_row - 1 == y;
@@ -465,20 +476,61 @@ void process_grid_press(u8 x, u8 y, u8 on) {
                 } else if (is_circularly_referenced(y)) {
                     do_error = 1;
                     error_ref_row = y + 1;
-                } else if (selected_row == y || (get_total_logical_refs() > GATE_OUTS - 2 && was_toggled_off == 0 && p.row[selected_row].logic.compared_row - 1 != y)) {
+                } else if (is_linked_circularly(y) || selected_row == y || (get_total_logical_refs() > GATE_OUTS - 2 && was_toggled_off == 0 && p.row[selected_row].logic.compared_row - 1 != y)) {
                     do_error = 1;
                     error_ref_row = selected_row + 1;
                 } else {
-                    set_bits_for_logic_update(x, y, was_toggled_off);
+                    // nested logic loop
+                    u8 last_compared_row = p.row[selected_row].logic.compared_row;
+                    u8 last_logic_type = p.row[selected_row].logic.type;
+
+                    p.row[selected_row].logic.type = was_toggled_off ? 0 : x;
+                    p.row[selected_row].logic.compared_row = was_toggled_off ? 0 : y + 1;
+                    p.row[selected_row].division = get_division(p.row[selected_row].position);
+
+                    if (is_linked_circularly(selected_row) == 0) {
+                        process_nested_change(selected_row);
+                    } else {
+                        p.row[selected_row].logic.type = last_logic_type;
+                        p.row[selected_row].logic.compared_row = last_compared_row;
+
+                        do_error = 1;
+                        error_ref_row = selected_row + 1;
+                    }
                 }
+            }
+        }
+
+        // division buttons
+        if (x > 3 && x < 16) {
+            p.row[y].position = x;
+            p.row[y].division = get_division(p.row[y].position);
+            set_trigger_bits(y, p.row[y].division);
+
+            // update each row that's compared against this row (SINGLE mode)
+            if (p.config.logic_depth == SINGLE) {
+                for (u8 i = 0; i < GATE_OUTS; i++) {
+                    if (p.row[i].logic.compared_row - 1 == y) {
+                        set_trigger_bits(i, p.row[i].division);
+                    }
+                }
+            } else if (p.config.logic_depth == NESTED) {
+                // nested logic loop
+                process_nested_change(y);
             }
         }
     }
 }
 
 void process_grid_held(u8 x, u8 y) {
-    if (x == 0 && y == 0 && page == MAIN) {
-        page = CONFIG;
+    if (x == 0 && y == 0) {
+        toggle_config_page();
+    }
+
+    // param save happening
+    if (page == CONFIG && x > 2 && x < 13 && y == 0) {
+        selected_preset = x - 3;
+        save_preset_with_confirmation();
     }
 }
 
@@ -486,6 +538,14 @@ void process_grid_held(u8 x, u8 y) {
 //
 // rendering functions 
 //
+
+void set_preset_leds() {
+    for (u8 x = 3; x < 13; x++) {
+        set_grid_led(x, 0, 6);
+    }
+
+    set_grid_led((selected_preset % 10) + 3, 0, 14);
+}
 
 u8 set_logic_led(u8 r, u8 t) {
     if (p.row[selected_row].logic.type == t && p.row[selected_row].logic.compared_row - 1 == r) {
@@ -505,6 +565,7 @@ u8 set_logic_led(u8 r, u8 t) {
             }
         }
     }
+    return 0;
 }
 
 void set_glyph_leds(enum logic_depth l) {
@@ -567,39 +628,118 @@ void render_grid(void) {
 
     if (page == CONFIG) {
         clear_all_grid_leds();
-
-        set_grid_led(0,0, 10);
-
+        set_preset_leds();
+        set_grid_led(0,0, 6);
         set_glyph_leds(p.config.logic_depth);
     } else {
-        // show that preset was saved with some flashing
-        if (is_preset_saved) {
-            for (u8 i = 0; i < GATE_OUTS; i++) {
-                set_grid_led(p.row[i].position, i, B_DIM);
-            }
-            is_preset_saved = 0;
+        clear_all_grid_leds();
+
+        for (u8 i = 0; i < GATE_OUTS; i++) {
+            set_grid_led(0, i, p.row[i].logic.compared_row > 0 ? B_DIM : 0);
+            set_grid_led(1, i, set_logic_led(i, 1));
+            set_grid_led(2, i, set_logic_led(i, 2));
+            set_grid_led(3, i, set_logic_led(i, 3));
+            set_grid_led(p.row[i].position, i, p.row[i].blink ? B_FULL + 3 : B_HALF);
+            p.row[i].blink = 0;
+        }
+
+        if (do_blink_error == 1) {
+            set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, B_FULL + 3);
         } else {
-            clear_all_grid_leds();
-
-            for (u8 i = 0; i < GATE_OUTS; i++) {
-                set_grid_led(0, i, p.row[i].logic.compared_row > 0 ? B_DIM : 0);
-                set_grid_led(1, i, set_logic_led(i, 1));
-                set_grid_led(2, i, set_logic_led(i, 2));
-                set_grid_led(3, i, set_logic_led(i, 3));
-                set_grid_led(p.row[i].position, i, p.row[i].blink ? B_FULL + 3 : B_HALF);
-                p.row[i].blink = 0;
-            }
-
-            if (do_blink_error == 1) {
-                set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, B_FULL + 3);
-            } else {
-                set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, B_HALF);
-            }
+            set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, B_HALF);
         }
     }
-
 }
 
 void render_arc(void) {
     // no arc support for now, could be added!
+}
+
+
+//
+// helper functions
+//
+
+u8 is_linked_circularly(u8 r) {
+    Node *stack = NULL;
+    u8 s;
+    u8 is_linked = 0;
+
+    push(&stack, r);
+    u8 r_comp = p.row[r].logic.compared_row;
+    while (r_comp > 0) {
+        if (r_comp - 1 == r) {
+            is_linked = 1;
+            break;
+        };
+        push(&stack, r_comp - 1);
+        r_comp = p.row[r_comp - 1].logic.compared_row;
+    }
+
+    // free up that memory
+    while(pop(&stack, &s)) { }
+
+    u8 r_comp2 = get_row_compared_from(r);
+    while (r_comp2 > 0) {
+       if (r_comp2 - 1 == r) {
+           is_linked = 1;
+           break;
+       }
+       r_comp2 = get_row_compared_from(r_comp2 - 1);
+    }
+
+    return is_linked;
+}
+
+void process_nested_change(u8 r) {
+    Node *stack = NULL;
+    u8 s;
+
+    push(&stack, r);
+    u8 r_comp1 = p.row[r].logic.compared_row;
+    while (r_comp1 > 0) {
+        push(&stack, r_comp1 - 1);
+        r_comp1 = p.row[r_comp1 - 1].logic.compared_row;
+    }
+
+    // set triggers on stack items LIFO
+    while (pop(&stack, &s)) {
+        p.row[s].division = get_division(p.row[s].position);
+        set_trigger_bits(s, p.row[s].division);
+    }
+
+    u8 r_comp2 = get_row_compared_from(r);
+    while (r_comp2 > 0) {
+       p.row[r_comp2 - 1].division = get_division(p.row[r_comp2 - 1].position);
+       set_trigger_bits(r_comp2 - 1, p.row[r_comp2 - 1].division);
+       r_comp2 = get_row_compared_from(r_comp2 - 1);
+    }
+
+    refresh_grid();
+}
+
+u8 push(Node **stack, u8 val) {
+    Node *p = malloc(sizeof(Node));
+    u8 success = p != NULL;
+
+    if (success) {
+        p->v = val;
+        p->next = *stack;
+        *stack = p;
+    }
+
+    return success;
+}
+
+u8 pop(Node **stack, u8 *val) {
+    u8 success = *stack != NULL;
+
+    if (success) {
+        Node *p = *stack;
+        *stack = (*stack)->next;
+        *val = p->v;
+        free(p);
+    }       
+
+    return success;
 }
