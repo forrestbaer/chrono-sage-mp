@@ -629,7 +629,7 @@ void render_grid(void) {
     if (page == CONFIG) {
         clear_all_grid_leds();
         set_preset_leds();
-        set_grid_led(0,0, 6);
+        set_grid_led(0, 0, 6);
         set_glyph_leds(p.config.logic_depth);
     } else {
         clear_all_grid_leds();
@@ -644,9 +644,9 @@ void render_grid(void) {
         }
 
         if (do_blink_error == 1) {
-            set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, B_FULL + 3);
+            set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, B_DIM);
         } else {
-            set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, B_HALF);
+            set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, 15);
         }
     }
 }
