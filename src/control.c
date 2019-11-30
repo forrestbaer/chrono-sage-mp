@@ -646,7 +646,7 @@ void render_grid(void) {
         if (do_blink_error == 1) {
             set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, B_DIM);
         } else {
-            set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, 15);
+            set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, 14);
         }
     }
 }
