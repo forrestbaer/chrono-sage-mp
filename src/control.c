@@ -37,7 +37,6 @@ shared_data_t s;
 
 enum page_type page;
 
-u8 nodes[8][8];
 u8 selected_row;
 u8 ec, do_error, do_blink_error, error_ref_row;
 u8 current_tick;
@@ -68,9 +67,8 @@ static u8 get_total_logical_refs(void);
 static u8 get_row_compared_from(u8 r);
 static u8 is_logically_referenced(u8 r, u8 include_selected);
 static u8 is_circularly_referenced(u8 r);
-static u8 is_linked_circularly(u8 r);
 
-static void process_nested_change(u8 r);
+static u8 process_nested_change(u8 r, u8 just_checking);
 static void set_bits_for_logic_update(u8 x, u8 y, u8 was_toggled_off);
 
 static void rotate_clocks(void);
@@ -101,6 +99,8 @@ void init_presets(void) {
     store_shared_data_to_flash(&s);
 
     p.config.logic_depth = SINGLE;
+    p.config.input_config = CLOCK;
+
     for (u8 i = 0; i < 12; i++) {
         p.config.clock_divs[i] = default_divisions[i];
     }
@@ -108,8 +108,9 @@ void init_presets(void) {
     for (u8 i = 0; i < GATE_OUTS; i++) {
         p.row[i].position = 15 - i;
         p.row[i].division = get_division(p.row[i].position);
+        p.row[i].logic.type = NONE;
+        p.row[i].logic.compared_row = 0;
         set_trigger_bits(i, p.row[i].division);
-        p.row[i].logic.type = 0;
     }
 
     for (u8 i = 0; i < MAX_PRESETS; i++) {
@@ -122,7 +123,7 @@ void init_presets(void) {
 void init_control(void) {
     // load shared data
     // load current preset and its meta data
-    current_tick = 0;
+    current_tick = MAX_STEPS - 1;
     selected_row = 0;
     page = MAIN;
 
@@ -142,7 +143,11 @@ void init_control(void) {
 void process_event(u8 event, u8 *data, u8 length) {
     switch (event) {
         case MAIN_CLOCK_RECEIVED:
-            if (data[1]) rotate_clocks();
+            if (p.config.input_config == CLOCK && data[1]) {
+                step();
+            } else if (p.config.input_config == ROTATE && data[1]) {
+                rotate_clocks();
+            }
             break;
         
         case MAIN_CLOCK_SWITCHED:
@@ -182,7 +187,7 @@ void process_event(u8 event, u8 *data, u8 length) {
             if (data[0] == SPEEDTIMER) {
                 update_speed_from_knob();
             } else if (data[0] == CLOCKTIMER) {
-                step();
+                if (!is_external_clock_connected() || p.config.input_config == ROTATE) step();
             } else if (data[0] == CLOCKOUTTIMER) {
                 set_clock_output(0);
             } else if (data[0] >= GATETIMER) {
@@ -266,10 +271,6 @@ void load_preset(u8 preset) {
     selected_preset = preset;
     load_preset_from_flash(selected_preset, &p);
 
-    //initEngine(&p.config);
-    //update_timer_interval(CLOCKTIMER, 60000 / p.speed);
-    //updateScales(p.scale_buttons);
-
     refresh_grid();
 }
 
@@ -282,6 +283,7 @@ void step() {
 
 void clock() {
     current_tick = (current_tick + 1) % MAX_STEPS;
+
     for (u8 i = 0; i < GATE_OUTS; i++) {
         if (p.row[i].triggers[current_tick]) fire_gate(i);
     }
@@ -330,13 +332,14 @@ void fire_error_alerts() {
 void update_speed_from_knob() {
     if (get_knob_count() == 0) return;
     
-    speed = ((get_knob_value(0) * 1980) >> 16) + 20;
+    //speed = ((get_knob_value(0) * 1980) >> 16) + 40;
+    speed = (get_knob_value(0) >> 6);
     update_speed();
 }
 
 void update_speed() {
     u32 sp = speed + speed_mod;
-    if (sp > 2000) sp = 2000; else if (sp < 20) sp = 20;
+    if (sp > 1000) sp = 1000; else if (sp < 30) sp = 30;
     
     update_timer_interval(CLOCKTIMER, 60000 / sp);
 }
@@ -363,7 +366,7 @@ u8 get_total_logical_refs() {
         if (p.row[i].logic.compared_row > 0) total_logical_references++;
     }
     return total_logical_references;
-};
+}
 
 u8 get_row_compared_from(u8 r) {
     for (u8 i = 0; i < GATE_OUTS; i++) {
@@ -405,6 +408,56 @@ void set_bits_for_logic_update(u8 x, u8 y, u8 toggled_off) {
     refresh_grid();
 }
 
+u8 process_nested_change(u8 r, u8 just_checking) {
+    Node *stack = NULL;
+    u8 s;
+    u8 is_linked = 0;
+
+    push(&stack, r);
+    u8 r_comp1 = p.row[r].logic.compared_row;
+    while (r_comp1 > 0) {
+        if (just_checking) {
+            if (r_comp1 - 1 == r) {
+                is_linked = 1;
+                break;
+            }
+        }
+        push(&stack, r_comp1 - 1);
+        r_comp1 = p.row[r_comp1 - 1].logic.compared_row;
+    }
+
+    // set triggers on stack items LIFO
+    while (pop(&stack, &s)) {
+        if (just_checking) {
+            // unload memory
+        } else {
+            p.row[s].division = get_division(p.row[s].position);
+            set_trigger_bits(s, p.row[s].division);
+        }
+    }
+
+    u8 r_comp2 = get_row_compared_from(r);
+    while (r_comp2 > 0) {
+        if (just_checking) {
+            if (r_comp2 - 1 == r) {
+                is_linked = 1;
+                break;
+            }
+        } else {
+            p.row[r_comp2 - 1].division = get_division(p.row[r_comp2 - 1].position);
+            set_trigger_bits(r_comp2 - 1, p.row[r_comp2 - 1].division);
+        }
+        r_comp2 = get_row_compared_from(r_comp2 - 1);
+    }
+
+    if (just_checking) {
+        return is_linked;
+    } else {
+        return 0;
+        refresh_grid();
+    }
+}
+
 void toggle_config_page() {
     page = page == CONFIG ? MAIN : CONFIG;
 }
@@ -429,6 +482,10 @@ void process_grid_press(u8 x, u8 y, u8 on) {
             if (!on) return;
             p.config.logic_depth = NESTED;
             reset_all_logic();
+        }
+
+        if ((x == 14 || x == 15) && y == 0 && !on) {
+            p.config.input_config = x == 14 ? CLOCK : ROTATE;
         }
 
         refresh_grid();
@@ -476,7 +533,7 @@ void process_grid_press(u8 x, u8 y, u8 on) {
                 } else if (is_circularly_referenced(y)) {
                     do_error = 1;
                     error_ref_row = y + 1;
-                } else if (is_linked_circularly(y) || selected_row == y || (get_total_logical_refs() > GATE_OUTS - 2 && was_toggled_off == 0 && p.row[selected_row].logic.compared_row - 1 != y)) {
+                } else if (process_nested_change(y, 1) || selected_row == y || (get_total_logical_refs() > GATE_OUTS - 2 && was_toggled_off == 0 && p.row[selected_row].logic.compared_row - 1 != y)) {
                     do_error = 1;
                     error_ref_row = selected_row + 1;
                 } else {
@@ -488,8 +545,8 @@ void process_grid_press(u8 x, u8 y, u8 on) {
                     p.row[selected_row].logic.compared_row = was_toggled_off ? 0 : y + 1;
                     p.row[selected_row].division = get_division(p.row[selected_row].position);
 
-                    if (is_linked_circularly(selected_row) == 0) {
-                        process_nested_change(selected_row);
+                    if (process_nested_change(selected_row, 1) == 0) {
+                        process_nested_change(selected_row, 0);
                     } else {
                         p.row[selected_row].logic.type = last_logic_type;
                         p.row[selected_row].logic.compared_row = last_compared_row;
@@ -516,7 +573,7 @@ void process_grid_press(u8 x, u8 y, u8 on) {
                 }
             } else if (p.config.logic_depth == NESTED) {
                 // nested logic loop
-                process_nested_change(y);
+                process_nested_change(y, 0);
             }
         }
     }
@@ -543,6 +600,9 @@ void set_preset_leds() {
     for (u8 x = 3; x < 13; x++) {
         set_grid_led(x, 0, 6);
     }
+
+    set_grid_led(14, 0, p.config.input_config == 0 ? B_FULL + 4 : B_HALF);
+    set_grid_led(15, 0, p.config.input_config == 1 ? B_FULL + 4 : B_HALF);
 
     set_grid_led((selected_preset % 10) + 3, 0, 14);
 }
@@ -659,64 +719,6 @@ void render_arc(void) {
 //
 // helper functions
 //
-
-u8 is_linked_circularly(u8 r) {
-    Node *stack = NULL;
-    u8 s;
-    u8 is_linked = 0;
-
-    push(&stack, r);
-    u8 r_comp = p.row[r].logic.compared_row;
-    while (r_comp > 0) {
-        if (r_comp - 1 == r) {
-            is_linked = 1;
-            break;
-        };
-        push(&stack, r_comp - 1);
-        r_comp = p.row[r_comp - 1].logic.compared_row;
-    }
-
-    // free up that memory
-    while(pop(&stack, &s)) { }
-
-    u8 r_comp2 = get_row_compared_from(r);
-    while (r_comp2 > 0) {
-       if (r_comp2 - 1 == r) {
-           is_linked = 1;
-           break;
-       }
-       r_comp2 = get_row_compared_from(r_comp2 - 1);
-    }
-
-    return is_linked;
-}
-
-void process_nested_change(u8 r) {
-    Node *stack = NULL;
-    u8 s;
-
-    push(&stack, r);
-    u8 r_comp1 = p.row[r].logic.compared_row;
-    while (r_comp1 > 0) {
-        push(&stack, r_comp1 - 1);
-        r_comp1 = p.row[r_comp1 - 1].logic.compared_row;
-    }
-
-    // set triggers on stack items LIFO
-    while (pop(&stack, &s)) {
-        p.row[s].division = get_division(p.row[s].position);
-        set_trigger_bits(s, p.row[s].division);
-    }
-
-    u8 r_comp2 = get_row_compared_from(r);
-    while (r_comp2 > 0) {
-       p.row[r_comp2 - 1].division = get_division(p.row[r_comp2 - 1].position);
-       set_trigger_bits(r_comp2 - 1, p.row[r_comp2 - 1].division);
-       r_comp2 = get_row_compared_from(r_comp2 - 1);
-    }
-
-    refresh_grid();
-}
 
 u8 push(Node **stack, u8 val) {
     Node *p = malloc(sizeof(Node));

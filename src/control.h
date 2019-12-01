@@ -7,6 +7,7 @@
 // defines data structures for multipass preset management
 // ----------------------------------------------------------------------------
 
+// 128, 64, 32, 16, 8, 7, 6, 5, 4, 3, 2, 1
 #define MAX_STEPS 128
 
 #pragma once
@@ -21,6 +22,7 @@
 
 enum logical_type { NONE, AND, OR, NOR };
 enum logic_depth { SINGLE, NESTED };
+enum input_config { CLOCK, ROTATE };
 enum page_type { MAIN, CONFIG };
 
 typedef struct node {
@@ -35,6 +37,7 @@ typedef struct {
 
 typedef struct {
     enum logic_depth logic_depth;
+    enum input_config input_config;
     u8 clock_divs[12]; 
 } config_t;
 
@@ -43,7 +46,6 @@ typedef struct {
     u8 division;
     u8 triggers[MAX_STEPS];
     u8 blink;
-    u8 logic_solved;
     logic_t logic;
 } row_params_t;
 
