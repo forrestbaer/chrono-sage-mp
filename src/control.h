@@ -44,6 +44,7 @@ typedef struct {
 typedef struct {
     u8 position;
     u8 division;
+    u8 offset;
     u8 triggers[MAX_STEPS];
     u8 blink;
     logic_t logic;

@@ -1,0 +1,13 @@
+#!/bin/sh
+cd multipass/monome_euro/meadowphysics
+make clean
+make
+make clean
+mkdir ../../../dist
+cp multipass_mp.hex ../../../dist/chrono-sage.hex
+cp multipass_mp.hex ../../../chrono-sage.hex
+cd ../../../
+cp flash dist/
+cp update_firmware.command dist/
+zip -r -X chrono-sage.zip dist
+rm -rf dist/

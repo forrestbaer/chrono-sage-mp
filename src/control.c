@@ -106,6 +106,7 @@ void init_presets(void) {
     }
     
     for (u8 i = 0; i < GATE_OUTS; i++) {
+        p.row[i].offset = 0;
         p.row[i].position = 15 - i;
         p.row[i].division = get_division(p.row[i].position);
         p.row[i].logic.type = NONE;
@@ -225,9 +226,18 @@ void process_event(u8 event, u8 *data, u8 length) {
 // actions
 
 void set_trigger_bits(u8 r, u8 d) {
-    for (int i = 0; i < MAX_STEPS; i++) {
+
+    // sets up an offset if a division doesn't land right on MAX_STEPS
+    for (int i = 0; i < MAX_STEPS; i++) { 
+        if (i == 0 && p.row[r].offset > 0) {
+            i = i + p.row[r].offset;
+            p.row[r].offset = 0;
+        }
         p.row[r].triggers[i] = (i + 1) % d == 0 ? 1 : 0;
+
+        if (i >= (MAX_STEPS - d) && i % d == 0) p.row[r].offset = d - (MAX_STEPS - i);
     }
+
     if (p.row[r].logic.type > 0) {
         switch(p.row[r].logic.type) {
             case 0:
