@@ -2,12 +2,12 @@
 cd multipass/monome_euro/meadowphysics
 make clean
 make
-make clean
-mkdir ../../../dist
-cp multipass_mp.hex ../../../dist/chrono-sage.hex
+mkdir ../../../chrono-sage
+cp multipass_mp.hex ../../../chrono-sage/chrono-sage.hex
 cp multipass_mp.hex ../../../chrono-sage.hex
+make clean
 cd ../../../
-cp flash dist/
-cp update_firmware.command dist/
-zip -r -X chrono-sage.zip dist
-rm -rf dist/
+cp flash chrono-sage/
+cp update_firmware.command chrono-sage/
+zip -r -X chrono-sage.zip chrono-sage
+rm -rf chrono-sage/

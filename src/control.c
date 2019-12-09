@@ -22,6 +22,10 @@
 #define SPEEDCYCLE 4
 #define CLOCKOUTWIDTH 10
 
+#define MAX_SPEED 1000
+#define MIN_SPEED 30
+#define SINGLE_DIVISION_SPEED 62
+
 #define B_FULL 9 
 #define B_HALF 6
 #define B_DIM 3
@@ -39,11 +43,12 @@ enum page_type page;
 
 u8 selected_row;
 u8 ec, do_error, do_blink_error, error_ref_row;
-u8 current_tick;
+u8 tickers[8];
+u16 knob_position, delta;
 u8 selected_preset;
 u8 is_preset_saved;
 u8 is_config_changed;
-u32 speed, speed_mod, gate_length_mod;
+u32 speed;
 
 u8 default_divisions[12] = {128,64,32,16,8,7,6,5,4,3,2,1};
 
@@ -124,7 +129,9 @@ void init_presets(void) {
 void init_control(void) {
     // load shared data
     // load current preset and its meta data
-    current_tick = MAX_STEPS - 1;
+    for (u8 i = 0; i << 8; i++) {
+        tickers[i] = MAX_STEPS - 1;
+    }
     selected_row = 0;
     page = MAIN;
 
@@ -135,7 +142,6 @@ void init_control(void) {
     // set up any other initial values and timers
     add_timed_event(CLOCKTIMER, 100, 1);
 
-    speed_mod = gate_length_mod = 0;
     update_speed_from_knob();
 
     add_timed_event(SPEEDTIMER, SPEEDCYCLE, 1);
@@ -227,17 +233,11 @@ void process_event(u8 event, u8 *data, u8 length) {
 
 void set_trigger_bits(u8 r, u8 d) {
 
-    // sets up an offset if a division doesn't land right on MAX_STEPS
     for (int i = 0; i < MAX_STEPS; i++) { 
-        if (i == 0 && p.row[r].offset > 0) {
-            i = i + p.row[r].offset;
-            p.row[r].offset = 0;
-        }
         p.row[r].triggers[i] = (i + 1) % d == 0 ? 1 : 0;
-
-        if (i >= (MAX_STEPS - d) && i % d == 0) p.row[r].offset = d - (MAX_STEPS - i);
     }
 
+    // TODO: possible to use offset for logical operations as well?
     if (p.row[r].logic.type > 0) {
         switch(p.row[r].logic.type) {
             case 0:
@@ -292,10 +292,21 @@ void step() {
 }
 
 void clock() {
-    current_tick = (current_tick + 1) % MAX_STEPS;
-
     for (u8 i = 0; i < GATE_OUTS; i++) {
-        if (p.row[i].triggers[current_tick]) fire_gate(i);
+        tickers[i] = (tickers[i] + 1) % MAX_STEPS;
+
+        // if logic doesn't land right on MAX_STEPS, can't currently wrap using offset..
+        if (tickers[i] == 0 && p.row[i].offset > 0) {
+            tickers[i] = tickers[i] + p.row[i].offset + 1;
+            p.row[i].offset = 0;
+        }
+
+        // sets up an offset if a division doesn't land right on MAX_STEPS
+        if (tickers[i] >= (MAX_STEPS - p.row[i].division) && tickers[i] % p.row[i].division == 0) {
+            p.row[i].offset = (p.row[i].division - (MAX_STEPS - tickers[i]));
+        } 
+
+        if (p.row[i].triggers[tickers[i]]) fire_gate(i);
     }
 }
 
@@ -320,7 +331,7 @@ void rotate_clocks() {
 
 void fire_gate(u8 r) {
     // can set dynamic gate length here
-    add_timed_event(GATETIMER + r, 10, 0);
+    add_timed_event(GATETIMER + r, 25, 0);
     set_gate(r, 1);
     p.row[r].blink = 1;
 }
@@ -341,15 +352,25 @@ void fire_error_alerts() {
 
 void update_speed_from_knob() {
     if (get_knob_count() == 0) return;
-    
-    //speed = ((get_knob_value(0) * 1980) >> 16) + 40;
-    speed = (get_knob_value(0) >> 6);
-    update_speed();
+
+    // this stuff doesn't work :(
+    if (get_knob_value(0) != knob_position) {
+        delta = knob_position > get_knob_value(0) ? knob_position - get_knob_value(0) : get_knob_value(0) - knob_position;
+    }
+
+    // speed = ((get_knob_value(0) * 1980) >> 16) + 40;
+    // slightly more sane value for meadowphysics
+    if (delta > 0) {
+        speed = (get_knob_value(0) >> 6);
+        delta = 0;
+        knob_position = get_knob_value(0);
+        update_speed();
+    }
 }
 
 void update_speed() {
-    u32 sp = speed + speed_mod;
-    if (sp > 1000) sp = 1000; else if (sp < 30) sp = 30;
+    u32 sp = speed;
+    if (sp > MAX_SPEED) sp = MAX_SPEED; else if (sp < MIN_SPEED) sp = MIN_SPEED;
     
     update_timer_interval(CLOCKTIMER, 60000 / sp);
 }
@@ -494,8 +515,18 @@ void process_grid_press(u8 x, u8 y, u8 on) {
             reset_all_logic();
         }
 
+        // input config clocked or clock rotation
         if ((x == 14 || x == 15) && y == 0 && !on) {
             p.config.input_config = x == 14 ? CLOCK : ROTATE;
+        }
+
+        // speed config via grid
+        if (x >= 0 && x <= 15 && y == 7 && !on) {
+            // TODO: experiment with speed divisions from grid
+            // 30-1000 is current limit
+            speed = (x + 1) * 62;
+            update_speed();
+            refresh_grid();
         }
 
         refresh_grid();
@@ -607,10 +638,20 @@ void process_grid_held(u8 x, u8 y) {
 //
 
 void set_preset_leds() {
+    // save slots
     for (u8 x = 3; x < 13; x++) {
         set_grid_led(x, 0, 6);
     }
 
+    // grid speed config leds
+    float asl = ((float)speed / MAX_SPEED) * 15;
+    u8 active_speed_led = (int)asl;
+    
+    for (u8 x = 0; x < 16; x++) {
+        set_grid_led(x, 7, x == active_speed_led ? B_FULL + 4 : 6);
+    }
+
+    // input config, 14 = CLOCK, 15 = ROTATE
     set_grid_led(14, 0, p.config.input_config == 0 ? B_FULL + 4 : B_HALF);
     set_grid_led(15, 0, p.config.input_config == 1 ? B_FULL + 4 : B_HALF);
 
