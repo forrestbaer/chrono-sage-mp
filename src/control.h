@@ -20,13 +20,20 @@
 enum logical_type { NONE, AND, OR, NOR };
 enum mode { LOGICAL, EUCLIDIAN };
 enum input_config { CLOCK, ROTATE };
-enum rotate_direction { LEFT, RIGHT };
+enum rotate_direction { CENTER, LEFT, RIGHT };
 enum page_type { MAIN, CONFIG };
 
 typedef struct {
     enum logical_type type;
     u8 compared_to_row;
 } logic_t;
+
+typedef struct {
+    u8 b_pos;
+    u8 tb_pos;
+    s8 offset;
+    enum rotate_direction direction;
+} euc_t;
 
 typedef struct {
     enum mode mode;
@@ -39,6 +46,7 @@ typedef struct {
     u8 division;
     u8 blink;
     u8 pattern_length;
+    euc_t euc;
     logic_t logic;
 } row_params_t;
 

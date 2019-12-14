@@ -11,7 +11,6 @@
 
 #include "compiler.h"
 #include "string.h"
-#include "math.h"
 
 #include "control.h"
 #include "interface.h"
@@ -49,7 +48,8 @@ u16 knob_position, delta;
 u8 selected_preset;
 u32 speed;
 
-u8 logical_divisions[12] = {128,64,32,16,8,7,6,5,4,3,2,1};
+u8 logical_divisions[12] = {128, 64, 32, 16, 8, 7, 6, 5, 4, 3, 2, 1};
+u8 euclidian_divisions[12] = {37, 31, 29, 23, 19, 17, 13, 11, 7, 5, 3, 2};
 
 static void step(void);
 static void output_clock(void);
@@ -58,6 +58,7 @@ static void update_speed_from_knob(void);
 static void update_speed(void);
 
 static void toggle_config_page(void);
+static void initialize_defaults(enum mode m);
 
 static u8 get_division(u8 pos);
 
@@ -81,7 +82,7 @@ static void rot_r(u8 arr[], u8 n);
 static void rot_l(u8 arr[], u8 n);
 static void rotate_array(u8 arr[], u8 n, enum rotate_direction dir, u8 times);
 
-static u8 t_euclid(float b, float tb, u8 index);
+static u8 t_euclid(u8 r, u8 index);
 static u8 t_logic(u8 r, u8 index);
 
 static void update_ticker(int r);
@@ -89,6 +90,37 @@ static void update_ticker(int r);
 
 // ----------------------------------------------------------------------------
 // functions for main.c
+
+void initialize_defaults(enum mode m) {
+    if (m == LOGICAL) {
+        for (u8 i = 0; i < 12; i++) {
+            p.config.clock_divs[i] = logical_divisions[i];
+        }
+    
+        for (u8 i = 0; i < GATE_OUTS; i++) {
+            p.row[i].position = 15 - i;
+            p.row[i].division = get_division(p.row[i].position);
+            p.row[i].logic.type = NONE;
+            p.row[i].logic.compared_to_row = 0;
+            p.row[i].pattern_length = p.row[i].division;
+            tickers[i] = 0;
+        }
+    }
+    if (m == EUCLIDIAN) {
+        for (u8 i = 0; i < 12; i++) {
+            p.config.clock_divs[i] = euclidian_divisions[i];
+        }
+    
+        for (u8 i = 0; i < GATE_OUTS; i++) {
+            p.row[i].euc.b_pos = 7;
+            p.row[i].euc.tb_pos = 9;
+            p.row[i].euc.offset = 0;
+            p.row[i].euc.direction = CENTER;
+            p.row[i].pattern_length = p.row[i].euc.tb_pos;
+            tickers[i] = 0;
+        }
+    }
+}
 
 void init_presets(void) {
     // called by main.c if there are no presets saved to flash yet
@@ -102,17 +134,7 @@ void init_presets(void) {
     p.config.mode = LOGICAL;
     p.config.input_config = CLOCK;
 
-    for (u8 i = 0; i < 12; i++) {
-        p.config.clock_divs[i] = logical_divisions[i];
-    }
-    
-    for (u8 i = 0; i < GATE_OUTS; i++) {
-        p.row[i].position = 15 - i;
-        p.row[i].division = get_division(p.row[i].position);
-        p.row[i].logic.type = NONE;
-        p.row[i].logic.compared_to_row = 0;
-        p.row[i].pattern_length = p.row[i].division;
-    }
+    initialize_defaults(p.config.mode);
 
     for (u8 i = 0; i < MAX_PRESETS; i++) {
         store_preset_to_flash(i, &m, &p);
@@ -257,16 +279,13 @@ void step() {
 
 void clock() {
     for (u8 i = 0; i < GATE_OUTS; i++) {
-        // reset ticker for channel if it's higher than pattern_length
-        //if (tickers[i] >= p.row[i].pattern_length) tickers[i] = 0;
         tickers[i] = (tickers[i] + 1) % p.row[i].pattern_length;
 
         if (p.config.mode == LOGICAL && t_logic(i, tickers[i])) {
             fire_gate(i);
-        } else if (p.config.mode == EUCLIDIAN) {
-
+        } else if (p.config.mode == EUCLIDIAN && t_euclid(i, tickers[i])) {
+            fire_gate(i);
         }
-        //tickers[i]++;
     }
 }
 
@@ -364,10 +383,12 @@ void process_grid_press(u8 x, u8 y, u8 on) {
         // setting of mode
         if ((x > 2 && x < 7) && (y > 1 && y < 6) && p.config.mode == EUCLIDIAN) {
             if (!on) return;
-            p.config.mode = LOGICAL; 
+            p.config.mode = LOGICAL;
+            initialize_defaults(LOGICAL);
         } else if ((x > 8 && x < 13) && (y > 1 && y < 6) && p.config.mode == LOGICAL) {
             if (!on) return;
             p.config.mode = EUCLIDIAN;
+            initialize_defaults(EUCLIDIAN);
         }
 
         // input config clocked or clock rotation
@@ -422,6 +443,32 @@ void process_grid_press(u8 x, u8 y, u8 on) {
 
             if (p.config.mode == EUCLIDIAN) {
                 // EUCLIDIAN button press rules for x 1-3 (ROTATE LEFT, RESTORE, ROTATE RIGHT)
+                switch(x) {
+                    case 1: // rotate left
+                        p.row[y].euc.offset--;
+                        if (abs(p.row[y].euc.offset) == p.row[y].pattern_length) {
+                            p.row[y].euc.offset = 0;
+                            p.row[y].euc.direction = CENTER;
+                        } else {
+                            if (p.row[y].euc.offset < 0) p.row[y].euc.direction = LEFT;
+                            if (p.row[y].euc.offset > 0) p.row[y].euc.direction = RIGHT;
+                        }
+                        break;
+                    case 2: // don't rotate
+                        p.row[y].euc.offset = 0;
+                        p.row[y].euc.direction = CENTER;
+                        break;
+                    case 3: // rotate right
+                        p.row[y].euc.offset++;
+                        if (abs(p.row[y].euc.offset) == p.row[y].pattern_length) {
+                            p.row[y].euc.offset = 0;
+                            p.row[y].euc.direction = CENTER;
+                        } else {
+                            if (p.row[y].euc.offset < 0) p.row[y].euc.direction = LEFT;
+                            if (p.row[y].euc.offset > 0) p.row[y].euc.direction = RIGHT;
+                        }
+                        break;
+                }
             }
         }
 
@@ -581,6 +628,12 @@ void render_grid(void) {
             }
         } else if (p.config.mode == EUCLIDIAN) {
             for (u8 i = 0; i < GATE_OUTS; i++) {
+                set_grid_led(1, i, p.row[i].euc.direction == LEFT ? B_FULL + 3 : B_DIM + 3);
+                set_grid_led(2, i, p.row[i].euc.direction == CENTER ? B_FULL + 3 : B_DIM + 3);
+                set_grid_led(3, i, p.row[i].euc.direction == RIGHT ? B_FULL + 3 : B_DIM + 3);
+                set_grid_led(p.row[i].euc.tb_pos, i, B_FULL);
+                set_grid_led(p.row[i].euc.b_pos, i, p.row[i].blink ? B_FULL + 3 : B_HALF);
+                p.row[i].blink = 0;
             }
         }
 
@@ -593,7 +646,7 @@ void render_grid(void) {
 }
 
 void render_arc(void) {
-    // no arc support for now, could be added!
+    // TODO: add arc support!
 }
 
 //
@@ -628,13 +681,16 @@ void rotate_array(u8 arr[], u8 n, enum rotate_direction dir, u8 times) {
 // logic/euclidian trigger checking functions
 //
 
-u8 t_euclid(float b, float tb, u8 index) {
+u8 t_euclid(u8 r, u8 index) {
+    float b = (float) get_division(p.row[r].euc.b_pos);
+    float tb = (float) get_division(p.row[r].euc.tb_pos);
+    u8 match;
     u8 previous;
-    u8 len = (int)tb;
-    u8 arr[len];
+    u8 len = (u8) tb;
+    u8* arr = malloc(len * sizeof(u8));
 
     for (u8 i = 0; i < tb; i++) {
-        u8 xVal = floor((b / tb) * i);
+        u8 xVal = (u8)((b / tb) * i);
         if (i == 0) {
             arr[i] = 1;
         } else {
@@ -642,8 +698,18 @@ u8 t_euclid(float b, float tb, u8 index) {
         }
         previous = xVal;
     }
+    
+    if (p.row[r].euc.offset != 0) {
+        rotate_array(arr, p.row[r].euc.offset, p.row[r].euc.direction, p.row[r].pattern_length);
+    }
 
-    if (index <= tb) return arr[index]; else return 0;
+    if (index <= tb) {
+        match = arr[index];
+        free(arr);
+        return match;
+    } 
+
+    return 0;
 }
 
 u8 t_logic(u8 r, u8 index) {
