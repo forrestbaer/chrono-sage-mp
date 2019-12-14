@@ -1,16 +1,17 @@
 // -----------------------------------------------------------------------------
 // controller - the glue between the engine and the hardware
 //
-// reacts to events (grid press, clock etc) and translates them into appropriate
-// engine actions. reacts to engine updates and translates them into user 
-// interface and hardware updates (grid LEDs, CV outputs etc)
+// reacts to events (grid press, clock etc) and translates them u8o appropriate
+// engine actions. reacts to engine updates and translates them u8o user 
+// u8erface and hardware updates (grid LEDs, CV outputs etc)
 //
-// should talk to hardware via what's defined in interface.h only
+// should talk to hardware via what's defined in u8erface.h only
 // should talk to the engine via what's defined in engine.h only
 // ----------------------------------------------------------------------------
 
 #include "compiler.h"
 #include "string.h"
+#include "math.h"
 
 #include "control.h"
 #include "interface.h"
@@ -46,11 +47,9 @@ u8 ec, do_error, do_blink_error, error_ref_row;
 u8 tickers[8];
 u16 knob_position, delta;
 u8 selected_preset;
-u8 is_preset_saved;
-u8 is_config_changed;
 u32 speed;
 
-u8 default_divisions[12] = {128,64,32,16,8,7,6,5,4,3,2,1};
+u8 logical_divisions[12] = {128,64,32,16,8,7,6,5,4,3,2,1};
 
 static void step(void);
 static void output_clock(void);
@@ -60,21 +59,13 @@ static void update_speed(void);
 
 static void toggle_config_page(void);
 
-static void set_trigger_bits(u8 r, u8 d);
 static u8 get_division(u8 pos);
 
 static void save_preset(void);
 static void save_preset_with_confirmation(void);
 static void load_preset(u8 preset);
 
-static void reset_all_logic(void);
-static u8 get_total_logical_refs(void);
-static u8 get_row_compared_from(u8 r);
-static u8 is_logically_referenced(u8 r, u8 include_selected);
 static u8 is_circularly_referenced(u8 r);
-
-static u8 process_nested_change(u8 r, u8 just_checking);
-static void set_bits_for_logic_update(u8 x, u8 y, u8 was_toggled_off);
 
 static void rotate_clocks(void);
 static void fire_gate(u8 r);
@@ -84,11 +75,16 @@ static void set_preset_leds(void);
 static void process_grid_press(u8 x, u8 y, u8 on);
 static void process_grid_held(u8 x, u8 y);
 static u8 set_logic_led(u8 r, u8 t); 
-static void set_glyph_leds(enum logic_depth l);
+static void set_glyph_leds(enum mode l);
 
-static u8 push(Node **stack, u8 val);
-static u8 pop(Node **stack, u8 *val);
+static void rot_r(u8 arr[], u8 n);
+static void rot_l(u8 arr[], u8 n);
+static void rotate_array(u8 arr[], u8 n, enum rotate_direction dir, u8 times);
 
+static u8 t_euclid(float b, float tb, u8 index);
+static u8 t_logic(u8 r, u8 index);
+
+static void update_ticker(int r);
 
 
 // ----------------------------------------------------------------------------
@@ -103,20 +99,19 @@ void init_presets(void) {
 
     store_shared_data_to_flash(&s);
 
-    p.config.logic_depth = SINGLE;
+    p.config.mode = LOGICAL;
     p.config.input_config = CLOCK;
 
     for (u8 i = 0; i < 12; i++) {
-        p.config.clock_divs[i] = default_divisions[i];
+        p.config.clock_divs[i] = logical_divisions[i];
     }
     
     for (u8 i = 0; i < GATE_OUTS; i++) {
-        p.row[i].offset = 0;
         p.row[i].position = 15 - i;
         p.row[i].division = get_division(p.row[i].position);
         p.row[i].logic.type = NONE;
-        p.row[i].logic.compared_row = 0;
-        set_trigger_bits(i, p.row[i].division);
+        p.row[i].logic.compared_to_row = 0;
+        p.row[i].pattern_length = p.row[i].division;
     }
 
     for (u8 i = 0; i < MAX_PRESETS; i++) {
@@ -130,7 +125,7 @@ void init_control(void) {
     // load shared data
     // load current preset and its meta data
     for (u8 i = 0; i << 8; i++) {
-        tickers[i] = MAX_STEPS - 1;
+        tickers[i] = 0;
     }
     selected_row = 0;
     page = MAIN;
@@ -231,36 +226,6 @@ void process_event(u8 event, u8 *data, u8 length) {
 // -----------------
 // actions
 
-void set_trigger_bits(u8 r, u8 d) {
-
-    for (int i = 0; i < MAX_STEPS; i++) { 
-        p.row[r].triggers[i] = (i + 1) % d == 0 ? 1 : 0;
-    }
-
-    // TODO: possible to use offset for logical operations as well?
-    if (p.row[r].logic.type > 0) {
-        switch(p.row[r].logic.type) {
-            case 0:
-            break;
-            case 1: // AND
-                for (int i = 0; i < MAX_STEPS; i++) {
-                    p.row[r].triggers[i] = p.row[r].triggers[i] && p.row[p.row[r].logic.compared_row - 1].triggers[i] ? 1 : 0;
-                }
-            break;
-            case 2: // OR
-                for (int i = 0; i < MAX_STEPS; i++) {
-                    p.row[r].triggers[i] = p.row[r].triggers[i] || p.row[p.row[r].logic.compared_row - 1].triggers[i] ? 1 : 0;
-                }
-            break;
-            case 3: // XOR
-                for (int i = 0; i < MAX_STEPS; i++) {
-                    p.row[r].triggers[i] = p.row[r].triggers[i] != p.row[p.row[r].logic.compared_row - 1].triggers[i] ? 1 : 0;
-                }
-            break;
-        }
-    }
-}
-
 u8 get_division(u8 pos) {
     return p.config.clock_divs[pos - 4];
 }
@@ -274,7 +239,6 @@ void save_preset() {
     store_preset_to_flash(selected_preset, &m, &p);
     store_shared_data_to_flash(&s);
     store_preset_index(selected_preset);
-    is_preset_saved = 1;
 }
 
 void load_preset(u8 preset) {
@@ -293,20 +257,16 @@ void step() {
 
 void clock() {
     for (u8 i = 0; i < GATE_OUTS; i++) {
-        tickers[i] = (tickers[i] + 1) % MAX_STEPS;
+        // reset ticker for channel if it's higher than pattern_length
+        //if (tickers[i] >= p.row[i].pattern_length) tickers[i] = 0;
+        tickers[i] = (tickers[i] + 1) % p.row[i].pattern_length;
 
-        // if logic doesn't land right on MAX_STEPS, can't currently wrap using offset..
-        if (tickers[i] == 0 && p.row[i].offset > 0) {
-            tickers[i] = tickers[i] + p.row[i].offset + 1;
-            p.row[i].offset = 0;
+        if (p.config.mode == LOGICAL && t_logic(i, tickers[i])) {
+            fire_gate(i);
+        } else if (p.config.mode == EUCLIDIAN) {
+
         }
-
-        // sets up an offset if a division doesn't land right on MAX_STEPS
-        if (tickers[i] >= (MAX_STEPS - p.row[i].division) && tickers[i] % p.row[i].division == 0) {
-            p.row[i].offset = (p.row[i].division - (MAX_STEPS - tickers[i]));
-        } 
-
-        if (p.row[i].triggers[tickers[i]]) fire_gate(i);
+        //tickers[i]++;
     }
 }
 
@@ -314,17 +274,18 @@ void rotate_clocks() {
     u8 next_position = 0;
     u8 first_pos = p.row[0].position;
     u8 first_div = get_division(first_pos);
+    u8 first_length = first_div;
 
     for (u8 i = 0; i < GATE_OUTS; i++) {
         next_position = (next_position + 1) % GATE_OUTS;
         if (next_position == 0) {
             p.row[7].position = first_pos;
             p.row[7].division = first_div;
-            set_trigger_bits(7, first_div);
+            p.row[7].pattern_length = first_length;
         } else {
             p.row[i].position = p.row[next_position].position;
             p.row[i].division = get_division(p.row[i].position);
-            set_trigger_bits(i, p.row[i].division);
+            p.row[i].pattern_length = p.row[i].division;
         }
     }
 }
@@ -380,113 +341,9 @@ void output_clock() {
     set_clock_output(1);
 }
 
-
-void reset_all_logic() {
-    for (u8 i = 0; i < GATE_OUTS; i++) {
-        p.row[i].logic.compared_row = 0;
-        p.row[i].logic.type = 0;
-        p.row[i].position = 15 - i;
-        p.row[i].division = get_division(p.row[i].position);
-        set_trigger_bits(i, p.row[i].division);
-    }
-}
-
-u8 get_total_logical_refs() {
-    u8 total_logical_references = 0;
-    for (u8 i = 0; i < GATE_OUTS; i++) {
-        if (p.row[i].logic.compared_row > 0) total_logical_references++;
-    }
-    return total_logical_references;
-}
-
-u8 get_row_compared_from(u8 r) {
-    for (u8 i = 0; i < GATE_OUTS; i++) {
-        if (p.row[i].logic.compared_row - 1 == r) return i + 1;
-    }
-    return 0;
-}
-
-u8 is_logically_referenced(u8 r, u8 include_selected) {
-    // don't allow a channel to be selected for logic if it's already selected for logic (logic loops)
-    u8 is_referenced = 0;
-    
-    for (u8 i = 0; i < GATE_OUTS; i++) {
-        if (include_selected) {
-            if (p.row[i].logic.compared_row - 1 == r) is_referenced = 1;
-        } else {
-            if (i != selected_row) {
-                if (p.row[i].logic.compared_row - 1 == r) is_referenced = 1;
-            }
-        }
-    }
-    
-    return is_referenced;
-}
-
 u8 is_circularly_referenced(u8 r) {
     // don't allow selection of logic on selected row (self referencing)
-    return p.row[r].logic.compared_row > 0 && p.row[r].logic.compared_row - 1 == selected_row;
-}
-
-void set_bits_for_logic_update(u8 x, u8 y, u8 toggled_off) {
-    p.row[selected_row].logic.type = toggled_off ? 0 : x;
-    p.row[selected_row].logic.compared_row = toggled_off ? 0 : y + 1;
-    p.row[selected_row].division = get_division(p.row[selected_row].position);
-
-    // reverse linked list for setting bits ?
-    set_trigger_bits(selected_row, p.row[selected_row].division);
-
-    refresh_grid();
-}
-
-u8 process_nested_change(u8 r, u8 just_checking) {
-    Node *stack = NULL;
-    u8 s;
-    u8 is_linked = 0;
-
-    push(&stack, r);
-    u8 r_comp1 = p.row[r].logic.compared_row;
-    while (r_comp1 > 0) {
-        if (just_checking) {
-            if (r_comp1 - 1 == r) {
-                is_linked = 1;
-                break;
-            }
-        }
-        push(&stack, r_comp1 - 1);
-        r_comp1 = p.row[r_comp1 - 1].logic.compared_row;
-    }
-
-    // set triggers on stack items LIFO
-    while (pop(&stack, &s)) {
-        if (just_checking) {
-            // unload memory
-        } else {
-            p.row[s].division = get_division(p.row[s].position);
-            set_trigger_bits(s, p.row[s].division);
-        }
-    }
-
-    u8 r_comp2 = get_row_compared_from(r);
-    while (r_comp2 > 0) {
-        if (just_checking) {
-            if (r_comp2 - 1 == r) {
-                is_linked = 1;
-                break;
-            }
-        } else {
-            p.row[r_comp2 - 1].division = get_division(p.row[r_comp2 - 1].position);
-            set_trigger_bits(r_comp2 - 1, p.row[r_comp2 - 1].division);
-        }
-        r_comp2 = get_row_compared_from(r_comp2 - 1);
-    }
-
-    if (just_checking) {
-        return is_linked;
-    } else {
-        return 0;
-        refresh_grid();
-    }
+    return p.row[r].logic.compared_to_row > 0 && p.row[r].logic.compared_to_row - 1 == selected_row;
 }
 
 void toggle_config_page() {
@@ -504,15 +361,13 @@ void process_grid_press(u8 x, u8 y, u8 on) {
             load_preset(selected_preset);
         }
 
-        // setting of logic_depth
-        if ((x > 2 && x < 7) && (y > 1 && y < 6) && p.config.logic_depth == NESTED) {
+        // setting of mode
+        if ((x > 2 && x < 7) && (y > 1 && y < 6) && p.config.mode == EUCLIDIAN) {
             if (!on) return;
-            p.config.logic_depth = SINGLE; 
-            reset_all_logic();
-        } else if ((x > 8 && x < 13) && (y > 1 && y < 6) && p.config.logic_depth == SINGLE) {
+            p.config.mode = LOGICAL; 
+        } else if ((x > 8 && x < 13) && (y > 1 && y < 6) && p.config.mode == LOGICAL) {
             if (!on) return;
-            p.config.logic_depth = NESTED;
-            reset_all_logic();
+            p.config.mode = EUCLIDIAN;
         }
 
         // input config clocked or clock rotation
@@ -524,7 +379,7 @@ void process_grid_press(u8 x, u8 y, u8 on) {
         if (x >= 0 && x <= 15 && y == 7 && !on) {
             // TODO: experiment with speed divisions from grid
             // 30-1000 is current limit
-            speed = (x + 1) * 62;
+            speed = (x + 1) * SINGLE_DIVISION_SPEED;
             update_speed();
             refresh_grid();
         }
@@ -534,7 +389,6 @@ void process_grid_press(u8 x, u8 y, u8 on) {
     } else if (page == MAIN) {
  
         if (!on) return;
-
         // main page
 
         // select a row
@@ -542,13 +396,12 @@ void process_grid_press(u8 x, u8 y, u8 on) {
             selected_row = y;
         }
 
-        // logic buttons
+        // logic type / rotate buttons
         if (x > 0 && x < 4) {
+            u8 was_toggled_off = p.row[selected_row].logic.type == x && p.row[selected_row].logic.compared_to_row - 1 == y;
 
-            u8 was_toggled_off = p.row[selected_row].logic.type == x && p.row[selected_row].logic.compared_row - 1 == y;
-
-            if (p.config.logic_depth == SINGLE) {
-                // rules for SINGLE logic depth
+            if (p.config.mode == LOGICAL) {
+                // LOGICAL button press rules for x 1-3 (NONE/AND/OR/XOR)
 
                 // don't allow for channel A->B & B->A (circular logic)
                 // don't allow selection of logic on selected row (self referencing)
@@ -559,62 +412,36 @@ void process_grid_press(u8 x, u8 y, u8 on) {
                     do_error = 1;
                     error_ref_row = selected_row + 1;
                 } else {
-                    set_bits_for_logic_update(x, y, was_toggled_off);
-                }
-            } else if (p.config.logic_depth == NESTED) {
-                // rules setup for NESTED logic depth
-
-                // don't allow selection of logic on selected row (self referencing)
-                // don't allow a channel to be selected for logic if it's already selected for logic (logic loops)
-                // don't allow for channel A->B & B->A (circular logic)
-                // don't allow all channels to have logic, otherwise a loop must exist
-                if (is_logically_referenced(y, 0)) {
-                    do_error = 1;
-                    error_ref_row = get_row_compared_from(y);
-                } else if (is_circularly_referenced(y)) {
-                    do_error = 1;
-                    error_ref_row = y + 1;
-                } else if (process_nested_change(y, 1) || selected_row == y || (get_total_logical_refs() > GATE_OUTS - 2 && was_toggled_off == 0 && p.row[selected_row].logic.compared_row - 1 != y)) {
-                    do_error = 1;
-                    error_ref_row = selected_row + 1;
-                } else {
-                    // nested logic loop
-                    u8 last_compared_row = p.row[selected_row].logic.compared_row;
-                    u8 last_logic_type = p.row[selected_row].logic.type;
-
                     p.row[selected_row].logic.type = was_toggled_off ? 0 : x;
-                    p.row[selected_row].logic.compared_row = was_toggled_off ? 0 : y + 1;
+                    p.row[selected_row].logic.compared_to_row = was_toggled_off ? 0 : y + 1;
                     p.row[selected_row].division = get_division(p.row[selected_row].position);
-
-                    if (process_nested_change(selected_row, 1) == 0) {
-                        process_nested_change(selected_row, 0);
-                    } else {
-                        p.row[selected_row].logic.type = last_logic_type;
-                        p.row[selected_row].logic.compared_row = last_compared_row;
-
-                        do_error = 1;
-                        error_ref_row = selected_row + 1;
-                    }
+                    p.row[selected_row].pattern_length = was_toggled_off ? p.row[selected_row].division : p.row[selected_row].division * p.row[p.row[selected_row].logic.compared_to_row - 1].division;
+                    update_ticker(selected_row);
                 }
+            }
+
+            if (p.config.mode == EUCLIDIAN) {
+                // EUCLIDIAN button press rules for x 1-3 (ROTATE LEFT, RESTORE, ROTATE RIGHT)
             }
         }
 
-        // division buttons
-        if (x > 3 && x < 16) {
-            p.row[y].position = x;
-            p.row[y].division = get_division(p.row[y].position);
-            set_trigger_bits(y, p.row[y].division);
-
-            // update each row that's compared against this row (SINGLE mode)
-            if (p.config.logic_depth == SINGLE) {
-                for (u8 i = 0; i < GATE_OUTS; i++) {
-                    if (p.row[i].logic.compared_row - 1 == y) {
-                        set_trigger_bits(i, p.row[i].division);
-                    }
+        // division / pulses buttons
+        if (x > 3 && x < 16 && p.row[y].position != x) {
+            // update each row that's compared against this row (LOGICAL mode)
+            if (p.config.mode == LOGICAL) {
+                // LOGICAL button press rules for x 4-15 (divisions)
+                p.row[y].position = x;
+                p.row[y].division = get_division(p.row[y].position);
+                if (p.row[y].logic.compared_to_row > 0) {
+                    p.row[y].pattern_length = p.row[y].division * p.row[p.row[y].logic.compared_to_row - 1].division;
+                } else {
+                    p.row[y].pattern_length = p.row[y].division;
                 }
-            } else if (p.config.logic_depth == NESTED) {
-                // nested logic loop
-                process_nested_change(y, 0);
+                update_ticker(y);
+            }
+
+            if (p.config.mode == EUCLIDIAN) {
+                // EUCLIDIAN button press rules for x 4-15 (set pulses for euclidian rhythm)
             }
         }
     }
@@ -630,13 +457,17 @@ void process_grid_held(u8 x, u8 y) {
         selected_preset = x - 3;
         save_preset_with_confirmation();
     }
+
+    if (page == MAIN && p.config.mode == EUCLIDIAN && x > 3 && x < 16) {
+        // EUCLIDIAN button hold rules for x 4-15 (set total beats for euclidian rhythm)
+    }
 }
+
 
 
 //
 // rendering functions 
 //
-
 void set_preset_leds() {
     // save slots
     for (u8 x = 3; x < 13; x++) {
@@ -659,17 +490,11 @@ void set_preset_leds() {
 }
 
 u8 set_logic_led(u8 r, u8 t) {
-    if (p.row[selected_row].logic.type == t && p.row[selected_row].logic.compared_row - 1 == r) {
+    if (p.row[selected_row].logic.type == t && p.row[selected_row].logic.compared_to_row - 1 == r) {
         return B_FULL + 3;
     } else {
-        if (p.config.logic_depth == SINGLE) {
+        if (p.config.mode == LOGICAL) {
             if (is_circularly_referenced(r) || selected_row == r) {
-               return B_DIM; 
-            } else {
-                return B_DIM + 3;
-            }
-        } else if (p.config.logic_depth == NESTED) {
-            if (is_logically_referenced(r, 0) || is_circularly_referenced(r) || selected_row == r || (get_total_logical_refs() > GATE_OUTS - 2 && p.row[selected_row].logic.compared_row - 1 != r)) {
                return B_DIM; 
             } else {
                 return B_DIM + 3;
@@ -679,17 +504,17 @@ u8 set_logic_led(u8 r, u8 t) {
     return 0;
 }
 
-void set_glyph_leds(enum logic_depth l) {
+void set_glyph_leds(enum mode l) {
     u8 bs = 6;
-    u8 bn = 6;
+    u8 be = 6;
 
-    if (l == SINGLE) {
+    if (l == LOGICAL) {
         bs = 12;
-    } else if (l == NESTED) {
-        bn = 12;
+    } else if (l == EUCLIDIAN) {
+        be = 12;
     }
 
-    // SINGLE
+    // LOGICAL
     // col 1
     set_grid_led(3, 2, bs);
     set_grid_led(3, 3, 2);
@@ -711,27 +536,27 @@ void set_glyph_leds(enum logic_depth l) {
     set_grid_led(6, 4, 2);
     set_grid_led(6, 5, bs);
 
-    // NESTED
+    // EUCLIDIAN
     // row 1
-    set_grid_led(9, 2, bn);
+    set_grid_led(9, 2, be);
     set_grid_led(10, 2, 2);
-    set_grid_led(11, 2, 2);
-    set_grid_led(12, 2, bn);
+    set_grid_led(11, 2, be);
+    set_grid_led(12, 2, 2);
     // row 2
-    set_grid_led(9, 3, bn);
-    set_grid_led(10, 3, bn);
+    set_grid_led(9, 3, 2);
+    set_grid_led(10, 3, 2);
     set_grid_led(11, 3, 2);
-    set_grid_led(12, 3, bn);
+    set_grid_led(12, 3, be);
     // row 3
-    set_grid_led(9, 4, bn);
+    set_grid_led(9, 4, be);
     set_grid_led(10, 4, 2);
-    set_grid_led(11, 4, bn);
-    set_grid_led(12, 4, bn);
+    set_grid_led(11, 4, 2);
+    set_grid_led(12, 4, 2);
     // row 4
-    set_grid_led(9, 5, bn);
-    set_grid_led(10, 5, 2);
+    set_grid_led(9, 5, 2);
+    set_grid_led(10, 5, be);
     set_grid_led(11, 5, 2);
-    set_grid_led(12, 5, bn);
+    set_grid_led(12, 5, be);
 }
 
 void render_grid(void) {
@@ -741,17 +566,22 @@ void render_grid(void) {
         clear_all_grid_leds();
         set_preset_leds();
         set_grid_led(0, 0, 6);
-        set_glyph_leds(p.config.logic_depth);
+        set_glyph_leds(p.config.mode);
     } else {
         clear_all_grid_leds();
 
-        for (u8 i = 0; i < GATE_OUTS; i++) {
-            set_grid_led(0, i, p.row[i].logic.compared_row > 0 ? B_DIM : 0);
-            set_grid_led(1, i, set_logic_led(i, 1));
-            set_grid_led(2, i, set_logic_led(i, 2));
-            set_grid_led(3, i, set_logic_led(i, 3));
-            set_grid_led(p.row[i].position, i, p.row[i].blink ? B_FULL + 3 : B_HALF);
-            p.row[i].blink = 0;
+        if (p.config.mode == LOGICAL) {
+            for (u8 i = 0; i < GATE_OUTS; i++) {
+                set_grid_led(0, i, p.row[i].logic.compared_to_row > 0 ? B_DIM : 0);
+                set_grid_led(1, i, set_logic_led(i, 1));
+                set_grid_led(2, i, set_logic_led(i, 2));
+                set_grid_led(3, i, set_logic_led(i, 3));
+                set_grid_led(p.row[i].position, i, p.row[i].blink ? B_FULL + 3 : B_HALF);
+                p.row[i].blink = 0;
+            }
+        } else if (p.config.mode == EUCLIDIAN) {
+            for (u8 i = 0; i < GATE_OUTS; i++) {
+            }
         }
 
         if (do_blink_error == 1) {
@@ -766,33 +596,110 @@ void render_arc(void) {
     // no arc support for now, could be added!
 }
 
-
 //
-// helper functions
+// array functions
 //
 
-u8 push(Node **stack, u8 val) {
-    Node *p = malloc(sizeof(Node));
-    u8 success = p != NULL;
-
-    if (success) {
-        p->v = val;
-        p->next = *stack;
-        *stack = p;
-    }
-
-    return success;
+void rot_r(u8 arr[], u8 n) 
+{ 
+   u8 x = arr[n-1], i; 
+   for (i = n-1; i > 0; i--) 
+      arr[i] = arr[i-1]; 
+   arr[0] = x; 
 }
 
-u8 pop(Node **stack, u8 *val) {
-    u8 success = *stack != NULL;
+void rot_l(u8 arr[], u8 n) 
+{ 
+   u8 x = arr[0], i; 
+   for (i = 0; i < n-1; i++) 
+      arr[i] = arr[i+1]; 
+   arr[n-1] = x; 
+}
 
-    if (success) {
-        Node *p = *stack;
-        *stack = (*stack)->next;
-        *val = p->v;
-        free(p);
-    }       
+void rotate_array(u8 arr[], u8 n, enum rotate_direction dir, u8 times) {
+    for (u8 i = 0; i < times; i++) {
+        if (dir == LEFT) rot_l(arr, n);
+        if (dir == RIGHT) rot_r(arr, n);
+    }
+}
 
-    return success;
+
+//
+// logic/euclidian trigger checking functions
+//
+
+u8 t_euclid(float b, float tb, u8 index) {
+    u8 previous;
+    u8 len = (int)tb;
+    u8 arr[len];
+
+    for (u8 i = 0; i < tb; i++) {
+        u8 xVal = floor((b / tb) * i);
+        if (i == 0) {
+            arr[i] = 1;
+        } else {
+            arr[i] = (xVal == previous) ? 0 : 1;
+        }
+        previous = xVal;
+    }
+
+    if (index <= tb) return arr[index]; else return 0;
+}
+
+u8 t_logic(u8 r, u8 index) {
+    u8 row_div = p.row[r].division;
+    u8 target_div = p.row[r].logic.compared_to_row > 0 ? p.row[p.row[r].logic.compared_to_row - 1].division : 0;
+
+    u8 len = p.row[r].logic.type > 0 ? row_div * target_div : row_div;
+    u8* row_array = malloc(len * sizeof(u8));
+    u8* target_array = malloc(len * sizeof(u8));
+
+    u8 match;
+
+    for (u8 i = 0; i <= len; i++) {
+        row_array[i] = (i + 1) % row_div == 0 ? 1 : 0;
+        target_array[i] = (i + 1) % target_div == 0 ? 1 : 0;
+    }
+
+    switch (p.row[r].logic.type) {
+        case 0:
+            match = row_array[index] == 1 ? 1 : 0;
+            break;
+        case 1: // AND
+            match = row_array[index] == 1 && target_array[index] == 1 ? 1 : 0;
+            break;
+        case 2: // OR
+            match = row_array[index] == 1 || target_array[index] == 1 ? 1 : 0;
+            break;
+        case 3: // XOR
+            match = row_array[index] != target_array[index] ? 1 : 0;
+            break;
+    }
+
+    free(row_array);
+    free(target_array);
+
+    return match;
+}
+
+void update_ticker(int r) {
+    u8 closest_row = 0;
+    u8 closest_amount = p.row[r].pattern_length;
+
+    for (u8 i = 0; i < GATE_OUTS; i++) {
+        if (p.row[r].pattern_length == p.row[i].pattern_length && r != i) {
+            tickers[r] = tickers[i];
+            return;
+        }
+    }
+    for (u8 i = 0; i < GATE_OUTS; i++) {
+        if (p.row[r].pattern_length < p.row[i].pattern_length && r != i) {
+            u8 new_offset = p.row[i].pattern_length - p.row[r].pattern_length;
+            if (new_offset < closest_amount) {
+                closest_amount = new_offset;
+                closest_row = i;
+            }
+        }
+    }
+    tickers[r] = tickers[closest_row];
 }
