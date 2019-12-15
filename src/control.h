@@ -21,7 +21,7 @@ enum logical_type { NONE, AND, OR, NOR };
 enum mode { LOGICAL, STEP };
 enum input_config { CLOCK, ROTATE };
 enum page_type { MAIN, CONFIG };
-enum gate_lengths { OFF = 0, SHORT = 25, LONG = 65};
+enum gate_lengths { OFF, SHORT, LONG};
 
 typedef struct {
     enum logical_type type;

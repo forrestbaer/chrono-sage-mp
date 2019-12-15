@@ -47,6 +47,7 @@ u8 tickers[8];
 u8 step_ticker;
 u16 knob_position, delta;
 u8 selected_preset;
+u8 half_width_pulse;
 u32 speed;
 
 u8 logical_divisions[12] = {128, 64, 32, 16, 8, 7, 6, 5, 4, 3, 2, 1};
@@ -286,28 +287,61 @@ void clock() {
 }
 
 void rotate_clocks() {
-    // TODO fix this to work with STEP
-    u8 next_position = 0;
-    u8 first_pos = p.row[0].position;
-    u8 first_div = get_division(first_pos);
-    u8 first_length = first_div;
+    if (p.config.mode == LOGICAL) {
+        u8 next_position = 0;
+        u8 first_pos = p.row[0].position;
+        u8 first_div = get_division(first_pos);
+        u8 first_length = first_div;
 
-    for (u8 i = 0; i < GATE_OUTS; i++) {
-        next_position = (next_position + 1) % GATE_OUTS;
-        if (next_position == 0) {
-            p.row[7].position = first_pos;
-            p.row[7].division = first_div;
-            p.row[7].pattern_length = first_length;
-        } else {
-            p.row[i].position = p.row[next_position].position;
-            p.row[i].division = get_division(p.row[i].position);
-            p.row[i].pattern_length = p.row[i].division;
+        for (u8 i = 0; i < GATE_OUTS; i++) {
+            next_position = (next_position + 1) % GATE_OUTS;
+            if (next_position == 0) {
+                p.row[7].position = first_pos;
+                p.row[7].division = first_div;
+                p.row[7].pattern_length = first_length;
+            } else {
+                p.row[i].position = p.row[next_position].position;
+                p.row[i].division = get_division(p.row[i].position);
+                p.row[i].pattern_length = p.row[i].division;
+            }
+        }
+    } else if (p.config.mode == STEP) {
+        u8 next_position = 0;
+        u8 first_gl[16];
+        u8 first_pulse[16];
+
+        for (u8 i = 0; i < 16; i++) {
+            first_gl[i] = p.row[0].step.gl[i];
+            first_pulse[i] = p.row[0].step.pulse[i];
+        }
+
+        for (u8 i = 0; i < GATE_OUTS; i++) {
+            next_position = (next_position + 1) % GATE_OUTS;
+            if (next_position == 0) {
+                for (u8 j = 0; j < 16; j++) {
+                    p.row[7].step.gl[j] = first_gl[j];
+                    p.row[7].step.pulse[j] = first_pulse[j];
+                }
+            } else {
+                for (u8 j = 0; j < 16; j++) {
+                    p.row[i].step.gl[j] = p.row[next_position].step.gl[j];
+                    p.row[i].step.pulse[j] = p.row[next_position].step.pulse[j];
+                }
+            }
         }
     }
+    refresh_grid();
 }
 
 void fire_gate(u8 r, enum gate_lengths gl) {
-    add_timed_event(GATETIMER + r, gl, 0);
+    if (gl == LONG) {
+        // 50% width pulse for LONG gates
+        add_timed_event(GATETIMER + r, half_width_pulse, 0);
+    } else if (gl == SHORT) {
+        // 10ms triggers for SHORT
+        add_timed_event(GATETIMER + r, 10, 0);
+    }
+    
     set_gate(r, 1);
     p.row[r].blink = 1;
 }
@@ -346,7 +380,10 @@ void update_speed_from_knob() {
 
 void update_speed() {
     u32 sp = speed;
+
     if (sp > MAX_SPEED) sp = MAX_SPEED; else if (sp < MIN_SPEED) sp = MIN_SPEED;
+
+    half_width_pulse = (60000 / sp) / 2;
     
     update_timer_interval(CLOCKTIMER, 60000 / sp);
 }
