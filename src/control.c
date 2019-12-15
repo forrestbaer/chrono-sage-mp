@@ -653,19 +653,19 @@ void set_glyph_leds(enum mode l) {
     set_grid_led(9, 2, be);
     set_grid_led(10, 2, 2);
     set_grid_led(11, 2, be);
-    set_grid_led(12, 2, 4);
+    set_grid_led(12, 2, 2);
     // row 2
     set_grid_led(9, 3, 2);
-    set_grid_led(10, 3, 2);
-    set_grid_led(11, 3, 4);
+    set_grid_led(10, 3, be);
+    set_grid_led(11, 3, 2);
     set_grid_led(12, 3, be);
     // row 3
     set_grid_led(9, 4, be);
-    set_grid_led(10, 4, 4);
-    set_grid_led(11, 4, 2);
+    set_grid_led(10, 4, 2);
+    set_grid_led(11, 4, be);
     set_grid_led(12, 4, 2);
     // row 4
-    set_grid_led(9, 5, 4);
+    set_grid_led(9, 5, 2);
     set_grid_led(10, 5, be);
     set_grid_led(11, 5, 2);
     set_grid_led(12, 5, be);
@@ -704,7 +704,7 @@ void render_grid(void) {
                     switch (p.row[y].step.gl[x]) {
                         case OFF: step_br = 0; break;
                         case SHORT: step_br = B_DIM; break;
-                        case LONG: step_br = B_HALF; break;
+                        case LONG: step_br = B_HALF + 4; break;
                     }
                     if (x == step_ticker) {
                         set_grid_led(x, y, p.row[y].step.pulse[x] ? step_br + 6 : 0);
