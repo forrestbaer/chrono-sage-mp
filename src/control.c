@@ -615,13 +615,15 @@ u8 set_logic_led(u8 r, u8 t) {
 }
 
 void set_glyph_leds(enum mode l) {
-    u8 bs = 8;
-    u8 be = 8;
+    u8 bs;
+    u8 be;
 
     if (l == LOGICAL) {
         bs = 13;
+        be = 8;
     } else if (l == STEP) {
         be = 13;
+        bs = 8;
     }
 
     // LOGICAL
