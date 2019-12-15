@@ -704,7 +704,7 @@ void render_grid(void) {
                     switch (p.row[y].step.gl[x]) {
                         case OFF: step_br = 0; break;
                         case SHORT: step_br = B_DIM; break;
-                        case LONG: step_br = B_HALF + 4; break;
+                        case LONG: step_br = B_HALF + 2; break;
                     }
                     if (x == step_ticker) {
                         set_grid_led(x, y, p.row[y].step.pulse[x] ? step_br + 6 : 0);
