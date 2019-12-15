@@ -44,12 +44,12 @@ enum page_type page;
 u8 selected_row;
 u8 ec, do_error, do_blink_error, error_ref_row;
 u8 tickers[8];
+u8 step_ticker;
 u16 knob_position, delta;
 u8 selected_preset;
 u32 speed;
 
 u8 logical_divisions[12] = {128, 64, 32, 16, 8, 7, 6, 5, 4, 3, 2, 1};
-u8 euclidian_divisions[12] = {37, 31, 29, 23, 19, 17, 13, 11, 7, 5, 3, 2};
 
 static void step(void);
 static void output_clock(void);
@@ -66,10 +66,9 @@ static void save_preset(void);
 static void save_preset_with_confirmation(void);
 static void load_preset(u8 preset);
 
-static u8 is_circularly_referenced(u8 r);
-
 static void rotate_clocks(void);
-static void fire_gate(u8 r);
+static void update_ticker(int r);
+static void fire_gate(u8 r, enum gate_lengths gl);
 static void fire_error_alerts(void);
 static void set_preset_leds(void);
 
@@ -78,14 +77,9 @@ static void process_grid_held(u8 x, u8 y);
 static u8 set_logic_led(u8 r, u8 t); 
 static void set_glyph_leds(enum mode l);
 
-static void rot_r(u8 arr[], u8 n);
-static void rot_l(u8 arr[], u8 n);
-static void rotate_array(u8 arr[], u8 n, enum rotate_direction dir, u8 times);
-
-static u8 t_euclid(u8 r, u8 index);
 static u8 t_logic(u8 r, u8 index);
-
-static void update_ticker(int r);
+static u8 t_step(u8 r, u8 index);
+static u8 is_circularly_referenced(u8 r);
 
 
 // ----------------------------------------------------------------------------
@@ -103,21 +97,20 @@ void initialize_defaults(enum mode m) {
             p.row[i].logic.type = NONE;
             p.row[i].logic.compared_to_row = 0;
             p.row[i].pattern_length = p.row[i].division;
-            tickers[i] = 0;
+            tickers[i] = p.row[i].pattern_length;
         }
     }
-    if (m == EUCLIDIAN) {
-        for (u8 i = 0; i < 12; i++) {
-            p.config.clock_divs[i] = euclidian_divisions[i];
+    if (m == STEP) {
+        for (u8 y = 0; y < GATE_OUTS; y++) {
+            for (u8 x = 0; x < 16; x++) {
+                p.row[y].step.pulse[x] = 0;
+                p.row[y].step.gl[x] = OFF;
+            }
         }
     
         for (u8 i = 0; i < GATE_OUTS; i++) {
-            p.row[i].euc.b_pos = 7;
-            p.row[i].euc.tb_pos = 9;
-            p.row[i].euc.offset = 0;
-            p.row[i].euc.direction = CENTER;
-            p.row[i].pattern_length = p.row[i].euc.tb_pos;
-            tickers[i] = 0;
+            p.row[i].pattern_length = 16;
+            tickers[i] = 15;
         }
     }
 }
@@ -149,6 +142,7 @@ void init_control(void) {
     for (u8 i = 0; i << 8; i++) {
         tickers[i] = 0;
     }
+    step_ticker = 0;
     selected_row = 0;
     page = MAIN;
 
@@ -282,14 +276,17 @@ void clock() {
         tickers[i] = (tickers[i] + 1) % p.row[i].pattern_length;
 
         if (p.config.mode == LOGICAL && t_logic(i, tickers[i])) {
-            fire_gate(i);
-        } else if (p.config.mode == EUCLIDIAN && t_euclid(i, tickers[i])) {
-            fire_gate(i);
+            fire_gate(i, SHORT);
+        } else if (p.config.mode == STEP && t_step(i, tickers[i])) {
+            fire_gate(i, p.row[i].step.gl[tickers[i]]);
         }
     }
+
+    step_ticker = (step_ticker + 1) % 16;
 }
 
 void rotate_clocks() {
+    // TODO fix this to work with STEP
     u8 next_position = 0;
     u8 first_pos = p.row[0].position;
     u8 first_div = get_division(first_pos);
@@ -309,9 +306,8 @@ void rotate_clocks() {
     }
 }
 
-void fire_gate(u8 r) {
-    // can set dynamic gate length here
-    add_timed_event(GATETIMER + r, 25, 0);
+void fire_gate(u8 r, enum gate_lengths gl) {
+    add_timed_event(GATETIMER + r, gl, 0);
     set_gate(r, 1);
     p.row[r].blink = 1;
 }
@@ -369,347 +365,8 @@ void toggle_config_page() {
     page = page == CONFIG ? MAIN : CONFIG;
 }
 
-void process_grid_press(u8 x, u8 y, u8 on) {
-
-    if (page == CONFIG) {
-        // config page
-
-        // param load happening
-        if (page == CONFIG && x > 2 && x < 13 && y == 0 && !on) {
-            selected_preset = x - 3;
-            load_preset(selected_preset);
-        }
-
-        // setting of mode
-        if ((x > 2 && x < 7) && (y > 1 && y < 6) && p.config.mode == EUCLIDIAN) {
-            if (!on) return;
-            p.config.mode = LOGICAL;
-            initialize_defaults(LOGICAL);
-        } else if ((x > 8 && x < 13) && (y > 1 && y < 6) && p.config.mode == LOGICAL) {
-            if (!on) return;
-            p.config.mode = EUCLIDIAN;
-            initialize_defaults(EUCLIDIAN);
-        }
-
-        // input config clocked or clock rotation
-        if ((x == 14 || x == 15) && y == 0 && !on) {
-            p.config.input_config = x == 14 ? CLOCK : ROTATE;
-        }
-
-        // speed config via grid
-        if (x >= 0 && x <= 15 && y == 7 && !on) {
-            // TODO: experiment with speed divisions from grid
-            // 30-1000 is current limit
-            speed = (x + 1) * SINGLE_DIVISION_SPEED;
-            update_speed();
-            refresh_grid();
-        }
-
-        refresh_grid();
-
-    } else if (page == MAIN) {
- 
-        if (!on) return;
-        // main page
-
-        // select a row
-        if (x == 0) {
-            selected_row = y;
-        }
-
-        // logic type / rotate buttons
-        if (x > 0 && x < 4) {
-            u8 was_toggled_off = p.row[selected_row].logic.type == x && p.row[selected_row].logic.compared_to_row - 1 == y;
-
-            if (p.config.mode == LOGICAL) {
-                // LOGICAL button press rules for x 1-3 (NONE/AND/OR/XOR)
-
-                // don't allow for channel A->B & B->A (circular logic)
-                // don't allow selection of logic on selected row (self referencing)
-                if (is_circularly_referenced(y)) {
-                    do_error = 1;
-                    error_ref_row = y + 1;
-                } else if (selected_row == y) {
-                    do_error = 1;
-                    error_ref_row = selected_row + 1;
-                } else {
-                    p.row[selected_row].logic.type = was_toggled_off ? 0 : x;
-                    p.row[selected_row].logic.compared_to_row = was_toggled_off ? 0 : y + 1;
-                    p.row[selected_row].division = get_division(p.row[selected_row].position);
-                    p.row[selected_row].pattern_length = was_toggled_off ? p.row[selected_row].division : p.row[selected_row].division * p.row[p.row[selected_row].logic.compared_to_row - 1].division;
-                    update_ticker(selected_row);
-                }
-            }
-
-            if (p.config.mode == EUCLIDIAN) {
-                // EUCLIDIAN button press rules for x 1-3 (ROTATE LEFT, RESTORE, ROTATE RIGHT)
-                switch(x) {
-                    case 1: // rotate left
-                        p.row[y].euc.offset--;
-                        if (abs(p.row[y].euc.offset) == p.row[y].pattern_length) {
-                            p.row[y].euc.offset = 0;
-                            p.row[y].euc.direction = CENTER;
-                        } else {
-                            if (p.row[y].euc.offset < 0) p.row[y].euc.direction = LEFT;
-                            if (p.row[y].euc.offset > 0) p.row[y].euc.direction = RIGHT;
-                        }
-                        break;
-                    case 2: // don't rotate
-                        p.row[y].euc.offset = 0;
-                        p.row[y].euc.direction = CENTER;
-                        break;
-                    case 3: // rotate right
-                        p.row[y].euc.offset++;
-                        if (abs(p.row[y].euc.offset) == p.row[y].pattern_length) {
-                            p.row[y].euc.offset = 0;
-                            p.row[y].euc.direction = CENTER;
-                        } else {
-                            if (p.row[y].euc.offset < 0) p.row[y].euc.direction = LEFT;
-                            if (p.row[y].euc.offset > 0) p.row[y].euc.direction = RIGHT;
-                        }
-                        break;
-                }
-            }
-        }
-
-        // division / pulses buttons
-        if (x > 3 && x < 16 && p.row[y].position != x) {
-            // update each row that's compared against this row (LOGICAL mode)
-            if (p.config.mode == LOGICAL) {
-                // LOGICAL button press rules for x 4-15 (divisions)
-                p.row[y].position = x;
-                p.row[y].division = get_division(p.row[y].position);
-                if (p.row[y].logic.compared_to_row > 0) {
-                    p.row[y].pattern_length = p.row[y].division * p.row[p.row[y].logic.compared_to_row - 1].division;
-                } else {
-                    p.row[y].pattern_length = p.row[y].division;
-                }
-                update_ticker(y);
-            }
-
-            if (p.config.mode == EUCLIDIAN) {
-                // EUCLIDIAN button press rules for x 4-15 (set pulses for euclidian rhythm)
-            }
-        }
-    }
-}
-
-void process_grid_held(u8 x, u8 y) {
-    if (x == 0 && y == 0) {
-        toggle_config_page();
-    }
-
-    // param save happening
-    if (page == CONFIG && x > 2 && x < 13 && y == 0) {
-        selected_preset = x - 3;
-        save_preset_with_confirmation();
-    }
-
-    if (page == MAIN && p.config.mode == EUCLIDIAN && x > 3 && x < 16) {
-        // EUCLIDIAN button hold rules for x 4-15 (set total beats for euclidian rhythm)
-    }
-}
-
-
-
-//
-// rendering functions 
-//
-void set_preset_leds() {
-    // save slots
-    for (u8 x = 3; x < 13; x++) {
-        set_grid_led(x, 0, 6);
-    }
-
-    // grid speed config leds
-    float asl = ((float)speed / MAX_SPEED) * 15;
-    u8 active_speed_led = (int)asl;
-    
-    for (u8 x = 0; x < 16; x++) {
-        set_grid_led(x, 7, x == active_speed_led ? B_FULL + 4 : 6);
-    }
-
-    // input config, 14 = CLOCK, 15 = ROTATE
-    set_grid_led(14, 0, p.config.input_config == 0 ? B_FULL + 4 : B_HALF);
-    set_grid_led(15, 0, p.config.input_config == 1 ? B_FULL + 4 : B_HALF);
-
-    set_grid_led((selected_preset % 10) + 3, 0, 14);
-}
-
-u8 set_logic_led(u8 r, u8 t) {
-    if (p.row[selected_row].logic.type == t && p.row[selected_row].logic.compared_to_row - 1 == r) {
-        return B_FULL + 3;
-    } else {
-        if (p.config.mode == LOGICAL) {
-            if (is_circularly_referenced(r) || selected_row == r) {
-               return B_DIM; 
-            } else {
-                return B_DIM + 3;
-            }
-        }
-    }
-    return 0;
-}
-
-void set_glyph_leds(enum mode l) {
-    u8 bs = 6;
-    u8 be = 6;
-
-    if (l == LOGICAL) {
-        bs = 12;
-    } else if (l == EUCLIDIAN) {
-        be = 12;
-    }
-
-    // LOGICAL
-    // col 1
-    set_grid_led(3, 2, bs);
-    set_grid_led(3, 3, 2);
-    set_grid_led(3, 4, 2);
-    set_grid_led(3, 5, bs);
-    // col 2
-    set_grid_led(4, 2, 2);
-    set_grid_led(4, 3, bs);
-    set_grid_led(4, 4, bs);
-    set_grid_led(4, 5, 2);
-    // col 3
-    set_grid_led(5, 2, 2);
-    set_grid_led(5, 3, bs);
-    set_grid_led(5, 4, bs);
-    set_grid_led(5, 5, 2);
-    // col 4
-    set_grid_led(6, 2, bs);
-    set_grid_led(6, 3, 2);
-    set_grid_led(6, 4, 2);
-    set_grid_led(6, 5, bs);
-
-    // EUCLIDIAN
-    // row 1
-    set_grid_led(9, 2, be);
-    set_grid_led(10, 2, 2);
-    set_grid_led(11, 2, be);
-    set_grid_led(12, 2, 2);
-    // row 2
-    set_grid_led(9, 3, 2);
-    set_grid_led(10, 3, 2);
-    set_grid_led(11, 3, 2);
-    set_grid_led(12, 3, be);
-    // row 3
-    set_grid_led(9, 4, be);
-    set_grid_led(10, 4, 2);
-    set_grid_led(11, 4, 2);
-    set_grid_led(12, 4, 2);
-    // row 4
-    set_grid_led(9, 5, 2);
-    set_grid_led(10, 5, be);
-    set_grid_led(11, 5, 2);
-    set_grid_led(12, 5, be);
-}
-
-void render_grid(void) {
-    if (!is_grid_connected()) return;
-
-    if (page == CONFIG) {
-        clear_all_grid_leds();
-        set_preset_leds();
-        set_grid_led(0, 0, 6);
-        set_glyph_leds(p.config.mode);
-    } else {
-        clear_all_grid_leds();
-
-        if (p.config.mode == LOGICAL) {
-            for (u8 i = 0; i < GATE_OUTS; i++) {
-                set_grid_led(0, i, p.row[i].logic.compared_to_row > 0 ? B_DIM : 0);
-                set_grid_led(1, i, set_logic_led(i, 1));
-                set_grid_led(2, i, set_logic_led(i, 2));
-                set_grid_led(3, i, set_logic_led(i, 3));
-                set_grid_led(p.row[i].position, i, p.row[i].blink ? B_FULL + 3 : B_HALF);
-                p.row[i].blink = 0;
-            }
-        } else if (p.config.mode == EUCLIDIAN) {
-            for (u8 i = 0; i < GATE_OUTS; i++) {
-                set_grid_led(1, i, p.row[i].euc.direction == LEFT ? B_FULL + 3 : B_DIM + 3);
-                set_grid_led(2, i, p.row[i].euc.direction == CENTER ? B_FULL + 3 : B_DIM + 3);
-                set_grid_led(3, i, p.row[i].euc.direction == RIGHT ? B_FULL + 3 : B_DIM + 3);
-                set_grid_led(p.row[i].euc.tb_pos, i, B_FULL);
-                set_grid_led(p.row[i].euc.b_pos, i, p.row[i].blink ? B_FULL + 3 : B_HALF);
-                p.row[i].blink = 0;
-            }
-        }
-
-        if (do_blink_error == 1) {
-            set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, B_DIM);
-        } else {
-            set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, 14);
-        }
-    }
-}
-
-void render_arc(void) {
-    // TODO: add arc support!
-}
-
-//
-// array functions
-//
-
-void rot_r(u8 arr[], u8 n) 
-{ 
-   u8 x = arr[n-1], i; 
-   for (i = n-1; i > 0; i--) 
-      arr[i] = arr[i-1]; 
-   arr[0] = x; 
-}
-
-void rot_l(u8 arr[], u8 n) 
-{ 
-   u8 x = arr[0], i; 
-   for (i = 0; i < n-1; i++) 
-      arr[i] = arr[i+1]; 
-   arr[n-1] = x; 
-}
-
-void rotate_array(u8 arr[], u8 n, enum rotate_direction dir, u8 times) {
-    for (u8 i = 0; i < times; i++) {
-        if (dir == LEFT) rot_l(arr, n);
-        if (dir == RIGHT) rot_r(arr, n);
-    }
-}
-
-
-//
-// logic/euclidian trigger checking functions
-//
-
-u8 t_euclid(u8 r, u8 index) {
-    float b = (float) get_division(p.row[r].euc.b_pos);
-    float tb = (float) get_division(p.row[r].euc.tb_pos);
-    u8 match;
-    u8 previous;
-    u8 len = (u8) tb;
-    u8* arr = malloc(len * sizeof(u8));
-
-    for (u8 i = 0; i < tb; i++) {
-        u8 xVal = (u8)((b / tb) * i);
-        if (i == 0) {
-            arr[i] = 1;
-        } else {
-            arr[i] = (xVal == previous) ? 0 : 1;
-        }
-        previous = xVal;
-    }
-    
-    if (p.row[r].euc.offset != 0) {
-        rotate_array(arr, p.row[r].euc.offset, p.row[r].euc.direction, p.row[r].pattern_length);
-    }
-
-    if (index <= tb) {
-        match = arr[index];
-        free(arr);
-        return match;
-    } 
-
-    return 0;
+u8 t_step(u8 r, u8 index) {
+    return p.row[r].step.pulse[index] == 1 ? 1 : 0;
 }
 
 u8 t_logic(u8 r, u8 index) {
@@ -768,4 +425,259 @@ void update_ticker(int r) {
         }
     }
     tickers[r] = tickers[closest_row];
+}
+
+void process_grid_press(u8 x, u8 y, u8 on) {
+
+    if (page == CONFIG) {
+        // param load happening
+        if (page == CONFIG && x > 2 && x < 13 && y == 0 && !on) {
+            selected_preset = x - 3;
+            load_preset(selected_preset);
+        }
+
+        // setting of mode
+        if ((x > 2 && x < 7) && (y > 1 && y < 6) && p.config.mode == STEP) {
+            if (!on) return;
+            p.config.mode = LOGICAL;
+            initialize_defaults(LOGICAL);
+        } else if ((x > 8 && x < 13) && (y > 1 && y < 6) && p.config.mode == LOGICAL) {
+            if (!on) return;
+            p.config.mode = STEP;
+            initialize_defaults(STEP);
+        }
+
+        // input config clocked or clock rotation
+        if ((x == 14 || x == 15) && y == 0 && !on) p.config.input_config = ROTATE;
+        if ((x == 0 || x == 1) && y == 0 && !on) p.config.input_config = CLOCK;
+
+        // speed config via grid
+        if (x >= 0 && x <= 15 && y == 7 && !on) {
+            // TODO: experiment with speed divisions from grid
+            // 30-1000 is current limit
+            speed = (x + 1) * SINGLE_DIVISION_SPEED;
+            update_speed();
+            refresh_grid();
+        }
+
+        refresh_grid();
+
+    } else if (page == MAIN) {
+        if (!on) return;
+
+        // select a row
+        if (x == 0 && p.config.mode == LOGICAL) {
+            selected_row = y;
+        }
+
+        // logic type
+        if (x > 0 && x < 4 && p.config.mode == LOGICAL) {
+            u8 was_toggled_off = p.row[selected_row].logic.type == x && p.row[selected_row].logic.compared_to_row - 1 == y;
+            // LOGICAL button press rules for x 1-3 (NONE/AND/OR/XOR)
+
+            // don't allow for channel A->B & B->A (circular logic)
+            // don't allow selection of logic on selected row (self referencing)
+            if (is_circularly_referenced(y)) {
+                do_error = 1;
+                error_ref_row = y + 1;
+            } else if (selected_row == y) {
+                do_error = 1;
+                error_ref_row = selected_row + 1;
+            } else {
+                p.row[selected_row].logic.type = was_toggled_off ? 0 : x;
+                p.row[selected_row].logic.compared_to_row = was_toggled_off ? 0 : y + 1;
+                p.row[selected_row].division = get_division(p.row[selected_row].position);
+                p.row[selected_row].pattern_length = was_toggled_off ? p.row[selected_row].division : p.row[selected_row].division * p.row[p.row[selected_row].logic.compared_to_row - 1].division;
+                update_ticker(selected_row);
+            }
+        }
+
+        // logical division press
+        if (x > 3 && x < 16 && p.config.mode == LOGICAL && p.row[y].position != x) {
+            // LOGICAL button press rules for x 4-15 (divisions)
+            p.row[y].position = x;
+            p.row[y].division = get_division(p.row[y].position);
+
+            if (p.row[y].logic.compared_to_row > 0) {
+                p.row[y].pattern_length = p.row[y].division * p.row[p.row[y].logic.compared_to_row - 1].division;
+            } else {
+                p.row[y].pattern_length = p.row[y].division;
+            }
+
+            update_ticker(y);
+
+            // update rows that logically reference this one
+            for (u8 i = 0; i < GATE_OUTS; i++) {
+                if (i != y && p.row[i].logic.compared_to_row - 1 == y) {
+                    p.row[i].pattern_length = p.row[y].division * p.row[i].division;
+                    update_ticker(i);
+                }
+            }
+        }
+
+        // step press
+        if (p.config.mode == STEP) {
+            switch(p.row[y].step.gl[x]) {
+                case OFF: p.row[y].step.gl[x] = SHORT; p.row[y].step.pulse[x] = 1; break;
+                case SHORT: p.row[y].step.gl[x] = LONG; break;
+                case LONG: p.row[y].step.gl[x] = OFF; p.row[y].step.pulse[x] = 0; break;
+            }
+        }
+    }
+}
+
+void process_grid_held(u8 x, u8 y) {
+    // param save happening
+    if (page == CONFIG && x > 2 && x < 13 && y == 0) {
+        selected_preset = x - 3;
+        save_preset_with_confirmation();
+    }
+}
+
+
+
+//
+// rendering functions 
+//
+void set_preset_leds() {
+    // save slots
+    for (u8 x = 3; x < 13; x++) {
+        set_grid_led(x, 0, 6);
+    }
+
+    // grid speed config leds
+    float asl = ((float)speed / MAX_SPEED) * 15;
+    u8 active_speed_led = (int)asl;
+    
+    for (u8 x = 0; x < 16; x++) {
+        set_grid_led(x, 7, x == active_speed_led ? B_FULL + 4 : 6);
+    }
+
+    // input config, 0+1 = CLOCK, 14+15 = ROTATE
+    set_grid_led(0, 0, p.config.input_config == 0 ? B_FULL + 4 : B_HALF);
+    set_grid_led(1, 0, p.config.input_config == 0 ? B_FULL + 4 : B_HALF);
+    set_grid_led(14, 0, p.config.input_config == 1 ? B_FULL + 4 : B_HALF);
+    set_grid_led(15, 0, p.config.input_config == 1 ? B_FULL + 4 : B_HALF);
+
+    set_grid_led((selected_preset % 10) + 3, 0, 14);
+}
+
+u8 set_logic_led(u8 r, u8 t) {
+    if (p.row[selected_row].logic.type == t && p.row[selected_row].logic.compared_to_row - 1 == r) {
+        return B_FULL + 3;
+    } else {
+        if (p.config.mode == LOGICAL) {
+            if (is_circularly_referenced(r) || selected_row == r) {
+               return B_DIM; 
+            } else {
+                return B_DIM + 3;
+            }
+        }
+    }
+    return 0;
+}
+
+void set_glyph_leds(enum mode l) {
+    u8 bs = 8;
+    u8 be = 8;
+
+    if (l == LOGICAL) {
+        bs = 13;
+    } else if (l == STEP) {
+        be = 13;
+    }
+
+    // LOGICAL
+    // col 1
+    set_grid_led(3, 2, bs);
+    set_grid_led(3, 3, 2);
+    set_grid_led(3, 4, 2);
+    set_grid_led(3, 5, bs);
+    // col 2
+    set_grid_led(4, 2, 2);
+    set_grid_led(4, 3, bs);
+    set_grid_led(4, 4, bs);
+    set_grid_led(4, 5, 2);
+    // col 3
+    set_grid_led(5, 2, 2);
+    set_grid_led(5, 3, bs);
+    set_grid_led(5, 4, bs);
+    set_grid_led(5, 5, 2);
+    // col 4
+    set_grid_led(6, 2, bs);
+    set_grid_led(6, 3, 2);
+    set_grid_led(6, 4, 2);
+    set_grid_led(6, 5, bs);
+
+    // STEP
+    // row 1
+    set_grid_led(9, 2, be);
+    set_grid_led(10, 2, 2);
+    set_grid_led(11, 2, be);
+    set_grid_led(12, 2, 4);
+    // row 2
+    set_grid_led(9, 3, 2);
+    set_grid_led(10, 3, 2);
+    set_grid_led(11, 3, 4);
+    set_grid_led(12, 3, be);
+    // row 3
+    set_grid_led(9, 4, be);
+    set_grid_led(10, 4, 4);
+    set_grid_led(11, 4, 2);
+    set_grid_led(12, 4, 2);
+    // row 4
+    set_grid_led(9, 5, 4);
+    set_grid_led(10, 5, be);
+    set_grid_led(11, 5, 2);
+    set_grid_led(12, 5, be);
+}
+
+void render_grid(void) {
+    if (!is_grid_connected()) return;
+
+    if (page == CONFIG) {
+        clear_all_grid_leds();
+        set_preset_leds();
+        set_glyph_leds(p.config.mode);
+    } else {
+        clear_all_grid_leds();
+
+        if (p.config.mode == LOGICAL) {
+            for (u8 i = 0; i < GATE_OUTS; i++) {
+                set_grid_led(0, i, p.row[i].logic.compared_to_row > 0 ? B_DIM : 0);
+                set_grid_led(1, i, set_logic_led(i, 1));
+                set_grid_led(2, i, set_logic_led(i, 2));
+                set_grid_led(3, i, set_logic_led(i, 3));
+                set_grid_led(p.row[i].position, i, p.row[i].blink ? B_FULL + 3 : B_HALF);
+                p.row[i].blink = 0;
+            }
+
+            if (do_blink_error == 1) {
+                set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, B_DIM);
+            } else {
+                set_grid_led(0, error_ref_row > 0 ? error_ref_row - 1 : selected_row, 14);
+            }
+        } else if (p.config.mode == STEP) {
+            u8 step_br;
+
+            for (u8 y = 0; y < GATE_OUTS; y++) {
+                for (u8 x = 0; x < 16; x++) {
+                    switch (p.row[y].step.gl[x]) {
+                        case OFF: step_br = 0; break;
+                        case SHORT: step_br = B_DIM; break;
+                        case LONG: step_br = B_HALF; break;
+                    }
+                    if (x == step_ticker) {
+                        set_grid_led(x, y, p.row[y].step.pulse[x] ? step_br + 6 : 0);
+                    } else {
+                        set_grid_led(x, y, p.row[y].step.pulse[x] ? step_br : 0);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void render_arc(void) {
+    // TODO: add arc support!
 }

@@ -18,10 +18,10 @@
 // shared types
 
 enum logical_type { NONE, AND, OR, NOR };
-enum mode { LOGICAL, EUCLIDIAN };
+enum mode { LOGICAL, STEP };
 enum input_config { CLOCK, ROTATE };
-enum rotate_direction { CENTER, LEFT, RIGHT };
 enum page_type { MAIN, CONFIG };
+enum gate_lengths { OFF = 0, SHORT = 25, LONG = 65};
 
 typedef struct {
     enum logical_type type;
@@ -29,11 +29,9 @@ typedef struct {
 } logic_t;
 
 typedef struct {
-    u8 b_pos;
-    u8 tb_pos;
-    s8 offset;
-    enum rotate_direction direction;
-} euc_t;
+    u8 pulse[16];
+    enum gate_lengths gl[16];
+} step_t;
 
 typedef struct {
     enum mode mode;
@@ -45,8 +43,9 @@ typedef struct {
     u8 position;
     u8 division;
     u8 blink;
+    u8 blink_col;
     u8 pattern_length;
-    euc_t euc;
+    step_t step;
     logic_t logic;
 } row_params_t;
 
